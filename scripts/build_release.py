@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -141,7 +142,8 @@ def main() -> None:
             smoke(wheel, src, scratch)
         args.output_dir.mkdir(parents=True, exist_ok=True)
         target = args.output_dir / wheel.name
-        wheel.replace(target)
+        # copy rather than replace: the temp dir may be on another filesystem
+        shutil.copy2(wheel, target)
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     print(f"built {target}\nsha256 {digest}")
 
