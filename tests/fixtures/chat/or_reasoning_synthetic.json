@@ -1,0 +1,37 @@
+{
+ "id": "gen-r",
+ "model": "author/model",
+ "provider": "DeepInfra",
+ "choices": [
+  {
+   "index": 0,
+   "finish_reason": "stop",
+   "message": {
+    "role": "assistant",
+    "content": "ans",
+    "reasoning": "Let me think.",
+    "reasoning_details": [
+     {
+      "type": "reasoning.text",
+      "text": "Let me think.",
+      "index": 0
+     },
+     {
+      "type": "reasoning.encrypted",
+      "data": "ENC",
+      "index": 1
+     }
+    ]
+   }
+  }
+ ],
+ "usage": {
+  "prompt_tokens": 5,
+  "completion_tokens": 9,
+  "total_tokens": 14,
+  "cost": 0.0003,
+  "completion_tokens_details": {
+   "reasoning_tokens": 7
+  }
+ }
+}

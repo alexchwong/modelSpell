@@ -1,0 +1,9 @@
+{
+ "model_instance_id": "qwen3-coder-next",
+ "output": [
+  {
+   "type": "message",
+   "content": "ans"
+  }
+ ]
+}

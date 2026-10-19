@@ -1,0 +1,14 @@
+: OPENROUTER PROCESSING
+
+data: {"id": "gen-abc", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hél"}, "finish_reason": null}]}
+
+data: {"id": "gen-abc", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "lo 🌍"}, "finish_reason": null}]}
+
+data: {"id": "gen-abc", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant", "content": " world"}, "finish_reason": null}]}
+
+data: {"id": "gen-abc", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+data: {"id": "gen-abc", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": null}], "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16, "cost": 0.00012}}
+
+data: [DONE]
+

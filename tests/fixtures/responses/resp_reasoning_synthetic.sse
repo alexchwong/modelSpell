@@ -1,0 +1,15 @@
+event: response.created
+data: {"type": "response.created", "response": {"id": "resp_2", "object": "response", "model": "m", "status": "in_progress", "output": []}}
+
+event: response.reasoning_text.delta
+data: {"type": "response.reasoning_text.delta", "delta": "Let me "}
+
+event: response.reasoning_text.delta
+data: {"type": "response.reasoning_text.delta", "delta": "think."}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "delta": "ans"}
+
+event: response.completed
+data: {"type": "response.completed", "response": {"id": "resp_2", "object": "response", "model": "m", "status": "completed", "output": [{"type": "reasoning", "content": [{"type": "reasoning_text", "text": "Let me think."}]}, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ans"}]}], "usage": {"input_tokens": 20, "output_tokens": 9, "total_tokens": 29, "output_tokens_details": {"reasoning_tokens": 5}, "input_tokens_details": {"cached_tokens": 2}}}}
+

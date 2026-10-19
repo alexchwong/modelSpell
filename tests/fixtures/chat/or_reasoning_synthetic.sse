@@ -1,0 +1,12 @@
+data: {"id": "gen-r", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"reasoning": "Let me ", "reasoning_details": [{"type": "reasoning.text", "text": "Let me ", "index": 0}]}, "finish_reason": null}]}
+
+data: {"id": "gen-r", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"reasoning": "think.", "reasoning_details": [{"type": "reasoning.text", "text": "think.", "index": 0}]}, "finish_reason": null}]}
+
+data: {"id": "gen-r", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"reasoning_details": [{"type": "reasoning.encrypted", "data": "ENC", "index": 1}]}, "finish_reason": null}]}
+
+data: {"id": "gen-r", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "ans"}, "finish_reason": "stop"}]}
+
+data: {"id": "gen-r", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {}, "finish_reason": null}], "usage": {"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14, "cost": 0.0003, "completion_tokens_details": {"reasoning_tokens": 7}}}
+
+data: [DONE]
+

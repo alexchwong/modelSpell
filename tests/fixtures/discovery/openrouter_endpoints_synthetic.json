@@ -1,0 +1,38 @@
+{
+ "data": {
+  "id": "a/model-one",
+  "name": "Model One",
+  "endpoints": [
+   {
+    "name": "DeepInfra | a/model-one",
+    "provider_name": "DeepInfra",
+    "tag": "deepinfra/turbo",
+    "context_length": 8192,
+    "max_completion_tokens": 4096,
+    "quantization": "fp8",
+    "pricing": {
+     "prompt": "0.0000002",
+     "completion": "0.0000004"
+    },
+    "supported_parameters": [
+     "reasoning",
+     "max_tokens"
+    ],
+    "status": 0
+   },
+   {
+    "name": "Together | a/model-one",
+    "provider_name": "Together",
+    "tag": "Together",
+    "quantization": null
+   },
+   {
+    "name": "NoTag | a/model-one",
+    "provider_name": "NoTag"
+   },
+   {
+    "tag": "orphan"
+   }
+  ]
+ }
+}

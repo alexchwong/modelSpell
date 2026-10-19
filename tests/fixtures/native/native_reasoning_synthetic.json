@@ -1,0 +1,18 @@
+{
+ "model_instance_id": "qwen3-coder-next",
+ "output": [
+  {
+   "type": "reasoning",
+   "content": "Let me think."
+  },
+  {
+   "type": "message",
+   "content": "ans"
+  }
+ ],
+ "stats": {
+  "input_tokens": 10,
+  "total_output_tokens": 9,
+  "reasoning_output_tokens": 5
+ }
+}

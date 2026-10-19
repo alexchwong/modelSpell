@@ -1,0 +1,2 @@
+data: {"id": "gen-abc", "model": "author/model", "provider": "DeepInfra", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "half"}, "finish_reason": null}]}
+

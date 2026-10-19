@@ -1,0 +1,33 @@
+event: chat.start
+data: {"type": "chat.start", "model_instance_id": "qwen3-coder-next"}
+
+event: model_load.progress
+data: {"type": "model_load.progress", "progress": 0.5}
+
+event: prompt_processing.start
+data: {"type": "prompt_processing.start"}
+
+event: prompt_processing.progress
+data: {"type": "prompt_processing.progress", "progress": 1.0}
+
+event: prompt_processing.end
+data: {"type": "prompt_processing.end"}
+
+event: message.start
+data: {"type": "message.start"}
+
+event: message.delta
+data: {"type": "message.delta", "content": "Hél"}
+
+event: message.delta
+data: {"type": "message.delta", "content": "lo 🌍"}
+
+event: message.delta
+data: {"type": "message.delta", "content": " world"}
+
+event: message.end
+data: {"type": "message.end"}
+
+event: chat.end
+data: {"type": "chat.end", "result": {"model_instance_id": "qwen3-coder-next", "output": [{"type": "message", "content": "Héllo 🌍 world"}], "stats": {"input_tokens": 10, "total_output_tokens": 4, "reasoning_output_tokens": 0, "tokens_per_second": 40.1}}}
+

@@ -1,0 +1,21 @@
+{
+ "id": "chatcmpl-2",
+ "model": "local",
+ "choices": [
+  {
+   "index": 0,
+   "finish_reason": "stop",
+   "message": {
+    "role": "assistant",
+    "content": "ans",
+    "reasoning_content": "thinking..."
+   }
+  }
+ ],
+ "usage": {
+  "prompt_tokens": 3,
+  "completion_tokens": 5,
+  "total_tokens": 8,
+  "cost": 0.5
+ }
+}

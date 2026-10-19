@@ -1,0 +1,22 @@
+# modelSpell — operating rules
+
+1. Work only in `.venv`: `python3 -m venv .venv`, activate it,
+   `python -m pip install -e '.[dev]'`. Never use system or conda Python; run
+   `python -m pytest`, never bare `pytest`. Never commit `.venv/` or a real API key.
+2. Keep audiences separate: `README.md` for users, `DEVEL.md` for maintenance,
+   `NEWS.md` for the changelog. Update `DEVEL.md` in the same change whenever layout,
+   commands, tests, UI, release steps or workflow permissions change.
+3. `NEWS.md` records user-visible changes only: one bullet of at most 20 words under
+   the version in `modelspell/_version.py`. Released sections are immutable. Tests,
+   docs, UI, scripts and CI changes need no entry and no version bump.
+4. `modelspell/_version.py` is the only version source. Bump it on `devel` before any
+   change to `modelspell/`, `pyproject.toml`, `README.md` or `LICENSE` reaches `main`,
+   and run `python scripts/build_release.py --smoke` before merging.
+5. The wheel ships only `modelspell/**`, metadata and `LICENSE`. Keep the hatch
+   `packages` and sdist `only-include` lists restrictive; packaging or metadata changes
+   must keep `scripts/build_release.py` verification and K3/K7 green.
+6. `tests.yml` keeps the 3.10/3.13 matrix and `workflow_call`; `release.yml` keeps
+   `contents: write`, its concurrency group, NEWS-derived notes and the sha256 install
+   line. Verify an action version bump before merging it.
+
+Where this file and `DEVEL.md` disagree, `DEVEL.md` wins; correct this file in the same change.

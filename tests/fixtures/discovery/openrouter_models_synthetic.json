@@ -1,0 +1,34 @@
+{
+ "data": [
+  {
+   "id": "b/model-two",
+   "name": "Model Two",
+   "context_length": 32768,
+   "pricing": {
+    "prompt": "0.000001",
+    "completion": "0.000002"
+   },
+   "supported_parameters": [
+    "tools",
+    "reasoning",
+    "max_tokens"
+   ]
+  },
+  {
+   "id": "a/model-one",
+   "name": "Model One",
+   "context_length": 8192,
+   "pricing": {
+    "prompt": "0",
+    "completion": "-1"
+   }
+  },
+  {
+   "id": "b/model-two",
+   "name": "duplicate"
+  },
+  {
+   "name": "entry without id"
+  }
+ ]
+}

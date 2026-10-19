@@ -1,0 +1,10 @@
+data: {"id": "chatcmpl-1", "model": "local", "choices": [{"index": 0, "delta": {"content": "Hél"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-1", "model": "local", "choices": [{"index": 0, "delta": {"content": "lo 🌍"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-1", "model": "local", "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-1", "model": "local", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+data: [DONE]
+

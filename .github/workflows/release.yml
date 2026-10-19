@@ -1,0 +1,107 @@
+name: Release modelSpell
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: modelspell-release
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  release:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Read version
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python -c 'import re,pathlib; print(re.search(r"^__version__ = \"([0-9]+\.[0-9]+\.[0-9]+)\"$", pathlib.Path("modelspell/_version.py").read_text(), re.M).group(1))')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether release already exists
+        id: existing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.config.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require version bump after shipped-file changes
+        if: steps.existing.outputs.exists == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.config.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          if ! python scripts/build_release.py --changed-since "$TAG"; then
+            echo "Shipped files changed after $TAG was released." >&2
+            echo "Bump modelspell/_version.py and add a NEWS.md entry before merging to main." >&2
+            exit 1
+          fi
+          echo "No shipped-file changes since $TAG; nothing to release."
+
+      - name: Build, verify and smoke-test the wheel
+        if: steps.existing.outputs.exists != 'true'
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_release.py --smoke --output-dir dist | tee build.log
+          echo "wheel=$(ls dist/*.whl)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(awk '/^sha256 /{print $2}' build.log)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.config.outputs.version }}
+          TAG: ${{ steps.config.outputs.tag }}
+          WHEEL: ${{ steps.build.outputs.wheel }}
+          SHA256: ${{ steps.build.outputs.sha256 }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NAME="$(basename "$WHEEL")"
+          {
+            awk -v v="## $VERSION" '$0==v{on=1;next} /^## /{on=0} on' NEWS.md
+            echo
+            echo "### Install"
+            echo
+            echo '```'
+            echo "modelSpell @ https://github.com/$REPO/releases/download/$TAG/$NAME#sha256=$SHA256"
+            echo '```'
+            echo
+            echo "sha256: \`$SHA256\`"
+          } > notes.md
+          gh release create "$TAG" "$WHEEL" \
+            --target "$(git rev-parse HEAD)" \
+            --title "modelSpell $VERSION" \
+            --notes-file notes.md

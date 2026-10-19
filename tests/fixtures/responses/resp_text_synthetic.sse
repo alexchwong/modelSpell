@@ -1,0 +1,15 @@
+event: response.created
+data: {"type": "response.created", "response": {"id": "resp_1", "object": "response", "model": "m", "status": "in_progress", "output": []}}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "delta": "Hél"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "delta": "lo 🌍"}
+
+event: response.output_text.delta
+data: {"type": "response.output_text.delta", "delta": " world"}
+
+event: response.completed
+data: {"type": "response.completed", "response": {"id": "resp_1", "object": "response", "model": "m", "status": "completed", "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Héllo 🌍 world"}]}], "usage": {"input_tokens": 12, "output_tokens": 4, "total_tokens": 16}}}
+

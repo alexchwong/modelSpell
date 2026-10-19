@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "modelSpell"            # display/distribution name; import name is `modelspell`
+dynamic = ["version"]          # single source: modelspell/_version.py
+description = "Dependency-free client for LM Studio, OpenRouter and OpenAI-compatible model servers"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Source = "https://github.com/alexchwong/modelSpell"
+
+[tool.hatch.version]
+path = "modelspell/_version.py"
+
+# The wheel ships only the library. Tests, the dev UI, scripts and docs never ship.
+[tool.hatch.build.targets.wheel]
+packages = ["modelspell"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["modelspell", "pyproject.toml", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-rs"
+pythonpath = ["."]
+markers = ["live: opt-in tests against real backends (see tests/test_live.py)"]

@@ -1,0 +1,13 @@
+{
+ "model_instance_id": "qwen3-coder-next",
+ "output": [
+  {
+   "type": "message",
+   "content": "long answer"
+  }
+ ],
+ "stats": {
+  "input_tokens": 10,
+  "total_output_tokens": 1500
+ }
+}

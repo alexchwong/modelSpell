@@ -1,0 +1,12 @@
+{
+ "id": "resp_4",
+ "object": "response",
+ "model": "m",
+ "status": "failed",
+ "output": [],
+ "usage": null,
+ "error": {
+  "code": "server_error",
+  "message": "model crashed"
+ }
+}

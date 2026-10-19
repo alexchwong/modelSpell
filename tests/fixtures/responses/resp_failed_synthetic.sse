@@ -1,0 +1,6 @@
+event: response.created
+data: {"type": "response.created", "response": {"id": "resp_4", "object": "response", "model": "m", "status": "in_progress", "error": {"code": "server_error", "message": "model crashed"}, "output": []}}
+
+event: response.failed
+data: {"type": "response.failed", "response": {"id": "resp_4", "object": "response", "model": "m", "status": "failed", "output": [], "usage": null, "error": {"code": "server_error", "message": "model crashed"}}}
+

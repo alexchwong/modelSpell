@@ -1,0 +1,31 @@
+{
+ "id": "gen-len",
+ "model": "author/model",
+ "provider": "Fireworks",
+ "choices": [
+  {
+   "index": 0,
+   "message": {
+    "role": "assistant",
+    "content": "cut off mid"
+   },
+   "finish_reason": "length"
+  }
+ ],
+ "usage": {
+  "prompt_tokens": 100,
+  "completion_tokens": 50,
+  "total_tokens": 150,
+  "cost": 0.002,
+  "cost_details": {
+   "upstream_inference_cost": 0.0019
+  },
+  "prompt_tokens_details": {
+   "cached_tokens": 80,
+   "cache_write_tokens": 10
+  },
+  "completion_tokens_details": {
+   "reasoning_tokens": 20
+  }
+ }
+}

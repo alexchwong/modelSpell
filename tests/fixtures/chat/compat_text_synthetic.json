@@ -1,0 +1,14 @@
+{
+ "id": "chatcmpl-1",
+ "model": "local",
+ "choices": [
+  {
+   "index": 0,
+   "message": {
+    "role": "assistant",
+    "content": "Héllo 🌍 world"
+   },
+   "finish_reason": "stop"
+  }
+ ]
+}

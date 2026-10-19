@@ -1,0 +1,18 @@
+{
+ "object": "list",
+ "data": [
+  {
+   "id": "zeta"
+  },
+  {
+   "id": "alpha"
+  },
+  {
+   "slug": "beta"
+  },
+  "gamma",
+  {
+   "id": "alpha"
+  }
+ ]
+}

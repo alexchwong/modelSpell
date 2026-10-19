@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modelSpell dev UI</title>
+<style>
+  :root { --bg:#fafafa; --fg:#1d1d1f; --muted:#6e6e73; --line:#d2d2d7; --box:#fff; --accent:#2f5bd3; --err:#c0392b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161617; --fg:#ececf0; --muted:#9a9aa2; --line:#3a3a3e; --box:#1f1f22; --accent:#7ea2ff; --err:#ff7a6b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
+  header { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  header h1 { font-size:16px; margin:0; }
+  #summary { color:var(--muted); font-family:ui-monospace, monospace; font-size:12px; flex:1; }
+  textarea, input, select { width:100%; font:inherit; color:inherit; background:var(--box); border:1px solid var(--line); border-radius:6px; padding:8px; }
+  textarea { resize:vertical; font-family:ui-monospace, monospace; }
+  button { font:inherit; padding:6px 14px; border-radius:6px; border:1px solid var(--line); background:var(--box); color:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width: 800px) { .grid { grid-template-columns:1fr; } }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  pre { margin:0; min-height:180px; max-height:50vh; overflow:auto; white-space:pre-wrap; word-break:break-word;
+        background:var(--box); border:1px solid var(--line); border-radius:6px; padding:8px; font:13px/1.45 ui-monospace, monospace; }
+  #reasoning { color:var(--muted); }
+  .row { display:flex; gap:8px; align-items:center; margin:8px 0; }
+  #status { font-family:ui-monospace, monospace; font-size:12px; color:var(--muted); }
+  #status.error { color:var(--err); }
+  dialog { border:1px solid var(--line); border-radius:10px; background:var(--bg); color:var(--fg); width:min(560px, 92vw); }
+  dialog::backdrop { background:rgba(0,0,0,.4); }
+  .inline { display:flex; gap:8px; } .inline > :first-child { flex:1; }
+  .hidden { display:none; }
+  details pre { min-height:0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>modelSpell dev UI <span id="version"></span></h1>
+  <span id="summary"></span>
+  <button id="open-settings">Model settings</button>
+</header>
+
+<label for="system">System prompt (optional)</label>
+<textarea id="system" rows="2"></textarea>
+<label for="prompt">Input</label>
+<textarea id="prompt" rows="6" placeholder="Ctrl+Enter to send"></textarea>
+<div class="row">
+  <button id="send" class="primary">Send</button>
+  <button id="stop" disabled>Stop</button>
+  <span id="status"></span>
+</div>
+
+<div class="grid">
+  <div><label>Reasoning stream</label><pre id="reasoning"></pre></div>
+  <div><label>Output</label><pre id="output"></pre></div>
+</div>
+<details><summary>Result (JSON)</summary><pre id="result"></pre></details>
+
+<dialog id="settings">
+  <form method="dialog" id="settings-form">
+    <label for="kind">Model source</label>
+    <select id="kind">
+      <option value="lmstudio">LM Studio</option>
+      <option value="openrouter">OpenRouter</option>
+      <option value="openai_compat">OpenAI-compatible</option>
+    </select>
+    <label for="base_url">Base URL (including /v1; blank = default)</label>
+    <input id="base_url" placeholder="">
+    <div id="key-row">
+      <label for="api_key">API key (write-only; blank keeps the current key) <span id="key-state"></span></label>
+      <div class="inline"><input id="api_key" type="password" autocomplete="off"><button type="button" id="clear-key">Clear</button></div>
+    </div>
+    <label for="model">Model ID</label>
+    <div class="inline"><input id="model" list="model-list"><button type="button" id="load-models">Load models</button></div>
+    <datalist id="model-list"></datalist>
+    <div id="provider-row">
+      <label for="provider">Provider (OpenRouter)</label>
+      <div class="inline"><select id="provider"><option value="">Any (OpenRouter routing)</option></select>
+        <button type="button" id="load-providers">Load providers</button></div>
+    </div>
+    <div id="reasoning-row">
+      <label for="reasoning_level">Reasoning</label>
+      <select id="reasoning_level">
+        <option value="">Backend default</option><option value="off">off</option>
+        <option value="low">low</option><option value="medium">medium</option><option value="high">high</option>
+      </select>
+    </div>
+    <label for="max_tokens">Max tokens (blank = backend default)</label>
+    <input id="max_tokens" type="number" min="1">
+    <p id="settings-msg" class="hidden"></p>
+    <div class="row" style="justify-content:flex-end">
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button type="button" id="save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const $ = (id) => document.getElementById(id);
+const DEFAULT_URL = { lmstudio: "http://localhost:1234/v1", openrouter: "https://openrouter.ai/api/v1", openai_compat: "required" };
+let state = {}, clearKey = false, controller = null;
+
+async function api(path, body) {
+  const r = await fetch(path, { method: body === undefined ? "GET" : "POST",
+    headers: { "X-Session-Token": TOKEN, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+function setStatus(text, error = false) { $("status").textContent = text; $("status").className = error ? "error" : ""; }
+
+function renderState() {
+  $("version").textContent = state.version ? "v" + state.version : "";
+  const parts = [state.kind, state.base_url || "(default URL)", state.model || "(no model)"];
+  if (state.kind === "openrouter") parts.push("provider=" + (state.provider || "any"));
+  if (state.reasoning) parts.push("reasoning=" + state.reasoning);
+  if (state.max_tokens) parts.push("max_tokens=" + state.max_tokens);
+  parts.push(state.key_set ? "key: set" : "key: none");
+  $("summary").textContent = parts.join(" · ");
+}
+
+function syncDialogVisibility() {
+  const kind = $("kind").value;
+  $("base_url").placeholder = DEFAULT_URL[kind];
+  $("provider-row").classList.toggle("hidden", kind !== "openrouter");
+  $("reasoning-row").classList.toggle("hidden", kind === "openai_compat");
+}
+
+function dialogConfig() {
+  const kind = $("kind").value, max = parseInt($("max_tokens").value, 10);
+  const cfg = { kind, base_url: $("base_url").value.trim(), model: $("model").value.trim(),
+    provider: kind === "openrouter" ? $("provider").value : "",
+    reasoning: kind === "openai_compat" ? "" : $("reasoning_level").value,
+    max_tokens: Number.isFinite(max) && max > 0 ? max : null };
+  if ($("api_key").value) cfg.api_key = $("api_key").value; else if (clearKey) cfg.api_key = "";
+  return cfg;
+}
+
+function settingsMsg(text) { $("settings-msg").textContent = text; $("settings-msg").classList.toggle("hidden", !text); }
+
+$("open-settings").onclick = () => {
+  $("kind").value = state.kind; $("base_url").value = state.base_url || ""; $("model").value = state.model || "";
+  $("reasoning_level").value = state.reasoning || ""; $("max_tokens").value = state.max_tokens || "";
+  $("api_key").value = ""; clearKey = false; $("key-state").textContent = state.key_set ? "(set)" : "(not set)";
+  const p = $("provider"); p.length = 1;
+  if (state.provider) p.add(new Option(state.provider, state.provider, true, true));
+  settingsMsg(""); syncDialogVisibility(); $("settings").showModal();
+};
+$("kind").onchange = syncDialogVisibility;
+$("clear-key").onclick = () => { clearKey = true; $("api_key").value = ""; $("key-state").textContent = "(will be cleared)"; };
+
+$("load-models").onclick = async () => {
+  const cfg = dialogConfig(); settingsMsg("Loading models…");
+  try {
+    const { models } = await api("/api/models", { kind: cfg.kind, base_url: cfg.base_url, api_key: cfg.api_key || null });
+    const list = $("model-list"); list.innerHTML = "";
+    for (const m of models) {
+      const tags = [m.loaded ? "loaded" : null, m.reasoning_options ? "reasoning: " + m.reasoning_options.join("/") : null,
+                    m.context_length ? m.context_length + " ctx" : null].filter(Boolean).join(", ");
+      list.append(new Option(tags ? `${m.name || m.id} (${tags})` : (m.name || m.id), m.id));
+    }
+    settingsMsg(`${models.length} models loaded; type to filter.`);
+  } catch (e) { settingsMsg(e.message); }
+};
+
+$("load-providers").onclick = async () => {
+  const cfg = dialogConfig(); settingsMsg("Loading providers…");
+  try {
+    const { providers } = await api("/api/providers", { kind: cfg.kind, base_url: cfg.base_url, api_key: cfg.api_key || null, model: cfg.model });
+    const p = $("provider"); p.length = 1;
+    for (const x of providers) {
+      const label = `${x.name} — ${x.slug ?? "no tag"}${x.quantization ? " · " + x.quantization : ""}${x.context_length ? " · " + x.context_length + " ctx" : ""}`;
+      const opt = new Option(label, x.slug ?? ""); opt.disabled = !x.slug; p.add(opt);
+    }
+    settingsMsg(`${providers.length} endpoints for ${cfg.model}.`);
+  } catch (e) { settingsMsg(e.message); }
+};
+
+$("save").onclick = async () => {
+  try { state = await api("/api/config", dialogConfig()); renderState(); $("settings").close(); }
+  catch (e) { settingsMsg(e.message); }
+};
+
+async function send() {
+  $("reasoning").textContent = ""; $("output").textContent = ""; $("result").textContent = "";
+  $("send").disabled = true; $("stop").disabled = false; setStatus("waiting for first token…");
+  controller = new AbortController();
+  const started = performance.now();
+  try {
+    const r = await fetch("/api/complete", { method: "POST", signal: controller.signal,
+      headers: { "X-Session-Token": TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: $("prompt").value, system: $("system").value }) });
+    if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+    const reader = r.body.getReader(), decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const ev = JSON.parse(buffer.slice(0, nl)); buffer = buffer.slice(nl + 1);
+        if (ev.type === "reasoning") { $("reasoning").textContent += ev.text; setStatus("streaming…"); }
+        else if (ev.type === "text") { $("output").textContent += ev.text; setStatus("streaming…"); }
+        else if (ev.type === "result") {
+          const res = ev.result, u = res.usage || {};
+          $("result").textContent = JSON.stringify(res, null, 2);
+          setStatus([`${((performance.now() - started) / 1000).toFixed(1)}s`, res.transport,
+            `finish=${res.finish_reason}`, res.truncated ? "TRUNCATED" : null,
+            `in=${u.input_tokens ?? "?"} out=${u.output_tokens ?? "?"}` + (u.reasoning_tokens != null ? ` reasoning=${u.reasoning_tokens}` : ""),
+            res.cost != null ? `$${res.cost.toFixed(6)}` : null, res.provider].filter(Boolean).join(" · "), res.truncated);
+        } else if (ev.type === "error") setStatus(ev.error, true);
+      }
+    }
+  } catch (e) {
+    setStatus(e.name === "AbortError" ? "stopped (the backend stops when its next token arrives)" : e.message, e.name !== "AbortError");
+  } finally { $("send").disabled = false; $("stop").disabled = true; controller = null; }
+}
+
+$("send").onclick = send;
+$("stop").onclick = () => { if (controller) { controller.abort(); setStatus("stopping…"); } };
+$("prompt").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); });
+
+api("/api/state").then((s) => { state = s; renderState(); }).catch((e) => setStatus(e.message, true));
+</script>
+</body>
+</html>
