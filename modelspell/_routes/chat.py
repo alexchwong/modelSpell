@@ -12,12 +12,30 @@ TRANSPORT = "chat_completions"
 EFFORT = {"off": "none", "low": "low", "medium": "medium", "high": "high"}
 
 
-def build_body(messages, model, *, reasoning, max_tokens, temperature, provider, streaming, kind) -> dict:
+# Support table (spec v6 §6.7): generation argument -> wire name, per kind. The setting checks,
+# build_body() and supported_settings() all read these mappings. reasoning and provider are
+# handled separately (§6.1).
+_COMMON = {"temperature": "temperature", "max_tokens": "max_tokens", "top_p": "top_p", "top_k": "top_k",
+           "min_p": "min_p", "presence_penalty": "presence_penalty", "frequency_penalty": "frequency_penalty",
+           "seed": "seed", "stop": "stop"}
+FIELDS = {
+    "openrouter": {**_COMMON, "repetition_penalty": "repetition_penalty"},
+    "openai_compat": dict(_COMMON),  # top_k/min_p are extensions; repetition_penalty is not sent (M2-3)
+}
+# Documented per-route ranges (spec v6 §6.8.2): argument -> (low or None, high), inclusive.
+RANGES = {
+    "openrouter": {"temperature": (None, 2), "repetition_penalty": (None, 2),
+                   "presence_penalty": (-2, 2), "frequency_penalty": (-2, 2)},
+    "openai_compat": {},
+}
+LABEL = {"openrouter": "the OpenRouter route", "openai_compat": "the openai_compat route"}
+
+
+def build_body(messages, model, *, reasoning, provider, settings, streaming, kind) -> dict:
     body = {"model": model, "messages": messages, "stream": streaming}
-    if temperature is not None:
-        body["temperature"] = temperature
-    if max_tokens is not None:
-        body["max_tokens"] = max_tokens
+    for arg, wire in FIELDS[kind].items():
+        if settings.get(arg) is not None:
+            body[wire] = list(settings[arg]) if arg == "stop" else settings[arg]
     if kind == "openrouter":
         if provider is not None:
             body["provider"] = dict(provider)

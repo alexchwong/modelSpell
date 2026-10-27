@@ -55,3 +55,16 @@ Check every captured file for the key before committing it. Add a row below with
 ## Verification V1 (§17)
 
 **Not run** — no `OPENROUTER_API_KEY` available at implementation time. Run `pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip` and record the printed entries, chosen slug, and outcome here.
+
+## Verification V2 (spec v6 §17)
+
+**Not run** (27 Oct 2026, package 0.2.0) — no LM Studio instance, no `OPENROUTER_API_KEY` and no llama-server were available in the implementation environment. Every backend is therefore **skipped**, every row of the support and range tables (spec v6 §6.7, §6.8.2) ships as documented, and the README marks them unverified. Nothing here may be described as verification until the checks below are run.
+
+Run with `python -m pytest -m live -s -k v2` (variables in `DEVEL.md`). Paste each printed `V2 {...}` line, then classify every `refused` record as a route limitation, a model or provider limitation, or an unrelated failure, and record what (if anything) changed.
+
+| Backend | Version | Route | Model / provider | Status |
+|---|---|---|---|---|
+| OpenRouter | — | chat_completions | — | skipped: no `OPENROUTER_API_KEY` |
+| LM Studio | — | lmstudio_native | — | skipped: no LM Studio instance |
+| LM Studio | — | responses | — | skipped: no LM Studio instance |
+| llama-server (`openai_compat`) | — | chat_completions | — | skipped: no llama-server |

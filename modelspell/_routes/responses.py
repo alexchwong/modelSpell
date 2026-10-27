@@ -13,12 +13,18 @@ TRANSPORT = "responses"
 _TERMINAL = {"response.completed", "response.incomplete", "response.failed"}
 
 
-def build_body(messages, model, *, reasoning, max_tokens, temperature, provider, streaming, kind) -> dict:
+# Support table (spec v6 §6.7): only temperature and max_tokens are sent on this route; LM Studio's
+# Responses documentation lists no sampling fields it honours (§7.2's rule, M2-3).
+FIELDS = {"temperature": "temperature", "max_tokens": "max_output_tokens"}
+RANGES: dict = {}
+LABEL = 'the LM Studio Responses route (reasoning other than "off")'
+
+
+def build_body(messages, model, *, reasoning, provider, settings, streaming, kind) -> dict:
     body = {"model": model, "input": messages, "stream": streaming}
-    if temperature is not None:
-        body["temperature"] = temperature
-    if max_tokens is not None:
-        body["max_output_tokens"] = max_tokens
+    for arg, wire in FIELDS.items():
+        if settings.get(arg) is not None:
+            body[wire] = settings[arg]
     if reasoning is not None:
         body["reasoning"] = {"effort": reasoning}
     return body

@@ -1,7 +1,7 @@
 # Developer guide
 
 This file is for repository maintenance. Library usage is documented in `README.md`; the
-behavioural contract is `docs/modelspell_v1_spec_v5.md`; agent operating rules are in
+behavioural contract is `docs/modelspell_v1_spec_v6.md`; agent operating rules are in
 `.clinerules`. Nothing in this guide, `.clinerules`, `tests/`, `ui/`, `scripts/`, `examples/`
 or `docs/` ships in the release wheel.
 
@@ -41,7 +41,7 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 | `scripts/build_release.py` | no | Builds and verifies the release wheel. |
 | `scripts/smoke_installed.py` | no | Smoke test run against an installed wheel (K3, `--smoke`). |
 | `examples/basic.py` | no | Usage example against a local LM Studio. |
-| `docs/` | no | Spec v5 (authoritative) and design history (informative). |
+| `docs/` | no | Spec v6 (authoritative), spec v5 (superseded, kept as history) and design history (informative). |
 | `.clinerules` | no | Agent operating rules; process detail lives in this guide. |
 | `.gitattributes` | no | Line-ending policy (`* text=auto eol=lf`). |
 | `.github/workflows/` | no | `tests.yml` (push, PR) and `release.yml` (push to `main`). |
@@ -85,10 +85,26 @@ checked on its own:
 |---|---|
 | LM Studio | `MODELSPELL_LIVE_LMSTUDIO_URL` (e.g. `http://localhost:1234/v1`), `MODELSPELL_LIVE_LMSTUDIO_MODEL` |
 | OpenRouter | `OPENROUTER_API_KEY`, `MODELSPELL_LIVE_OPENROUTER_MODEL` (`author/slug`) |
+| llama-server (V2 only, as `openai_compat`) | `MODELSPELL_LIVE_LLAMASERVER_URL` (including `/v1`), `MODELSPELL_LIVE_LLAMASERVER_MODEL` |
 
 Run verification V1 with
 `python -m pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip`
 and record the printed evidence in `tests/fixtures/README.md`.
+
+**Verification V2** (spec v6 §17) checks the generation-settings tables against real servers
+before a release that changes them. Run `python -m pytest -m live -s -k v2`. Each call prints one
+`V2 {...}` JSON line with backend, version, route, model, provider, setting, value and outcome.
+
+- `accepted` means the request succeeded; it never means the setting was applied
+  (`effect_unverified`). `refused` is a 4xx attributable to the request; `unrelated` is auth,
+  availability, rate limiting or network, and changes nothing (re-run it).
+- A refused *supported* setting fails the test. Classify it before release as a route limitation
+  (same refusal across models/providers, or documented: move the setting to "—" for that route),
+  a model or provider limitation (record it; the README lists it; the table does not change), or
+  unrelated. Ranges change only on the evidence rule in spec v6 §6.8.2.
+- Paste the records and the classification into `tests/fixtures/README.md`. A backend that was
+  not available is recorded as skipped with the reason, and its README rows stay marked
+  unverified; never describe a skipped check, or one `openai_compat` server, as verification.
 
 **Fixtures.** `tests/fixtures/README.md` holds the capture procedure and the coverage table. All
 current fixtures are synthetic. When you capture a real response, check it for your key
@@ -109,18 +125,55 @@ It prints a `http://127.0.0.1:<port>/?t=<token>` address and opens it. The serve
   applies, e.g. `OPENROUTER_API_KEY`);
 - always streams, and shows the full `Result` as JSON under the output.
 
+**Model settings vs generation settings.** The *Model settings* dialog holds what identifies the
+model and how to reach it: model source, base URL, key, model ID and OpenRouter provider. These are
+held once per process and shared by every tab. Every generation setting lives in the **request
+panel** under the input and is sent with each request: reasoning, temperature and max tokens
+always visible; top-p, top-k, min-p, repetition/presence/frequency penalty, seed and stop sequences
+under *Advanced* (collapsed, with a count such as "Advanced (3 set, 1 not sent)").
+
+- Generation settings are **per tab and per request, and never saved**: nothing goes to the
+  server or browser storage, and a reload clears them. Saving settings is AgentWiz's job.
+- A blank field is not sent (backend default); `0` is a value and is sent.
+- Fields modelSpell does not send on the current route (from `supported` in `/api/state`, i.e.
+  `supported_settings()`) are **disabled and not sent**, but keep their value; they are labelled
+  "not sent at this reasoning level" or "not sent with this model source".
+- The page refuses only what JavaScript/JSON would change silently: non-numeric text, non-finite
+  numbers (`1e400`) and non-safe integers for max tokens, top-k and seed. Everything else, ranges
+  included, is left to modelSpell, whose error arrives as an `error` event. The UI does not call
+  `check_settings()`: it exists to exercise `complete()` itself.
+- **"Settings sent"** in the Result panel (`settings_sent` in the `result` event, including the
+  provider pin) records what was sent, not what the model applied.
+- **Stop sequences** are one per line; a stop sequence containing a newline cannot be entered.
+- **Cross-tab limits.** If another tab changes the model source, a page's `supported` lists are
+  stale until it reloads; its next request may carry a setting the new route refuses, which
+  arrives as an `error` event (nothing is dropped). No revision checks are made.
+- `/api/config` refuses `reasoning` and `max_tokens` with HTTP 400 (they moved to the request
+  panel). `/api/complete` refuses a `settings` value that is not an object, or has an unknown key,
+  with HTTP 400 before streaming.
+
 **Stop limitation.** Stop closes the browser request; the server notices on its next write, i.e.
 when the next token arrives, and then cancels the upstream call. It cannot interrupt prompt
 processing before the first token, because v1 cancellation exists only inside callbacks (§8.10).
 
-`tests/test_ui.py` covers the HTTP contract (token, key handling, event stream, discovery,
-disconnect → cancel). The HTML/JS is not tested.
+`tests/test_ui.py` covers the HTTP contract (U1–U10: token, key handling, event stream, discovery,
+disconnect → cancel, per-request settings, `supported`, refusals, zero values). The HTML/JS is not
+tested automatically. After changing the page, run this manual check list once, against a real
+backend or a fake one:
+
+1. On LM Studio, switch reasoning between off and low, and watch the advanced fields enable and
+   disable.
+2. Set top-k, collapse Advanced, and see "1 set". Then switch to low and see "1 set, 1 not sent".
+3. Send with temperature and seed set, and find both under "Settings sent" in the Result panel.
+4. Enter `1e400` as temperature, and see the page refuse it without sending.
+5. Enter temperature 3 on OpenRouter, and see modelSpell's `ConfigError`.
+6. Reset, and see every field blank.
 
 ## Changing behaviour
 
 The spec is the contract. A behaviour change updates, in the same change:
 
-1. `docs/modelspell_v1_spec_v5.md` (or a new spec version), including §14 if it deviates from NEL;
+1. `docs/modelspell_v1_spec_v6.md` (or a new spec version), including §14 if it deviates from NEL;
 2. the tests named in the spec for that behaviour;
 3. `README.md` where it documents the behaviour;
 4. `NEWS.md` under the next version;
@@ -153,7 +206,7 @@ both and on pull requests (Python 3.10 and 3.13).
 Downstream projects should depend on the release wheel by URL and hash, e.g.
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.1.0/modelspell-0.1.0-py3-none-any.whl#sha256=<sha256>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.2.0/modelspell-0.2.0-py3-none-any.whl#sha256=<sha256>
 ```
 
 Releases are the supported install channel. Installing from an arbitrary commit

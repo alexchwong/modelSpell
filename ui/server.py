@@ -6,6 +6,10 @@ Binds to 127.0.0.1 only. Every request must carry the per-launch session token (
 `t` parameter; API calls send it as X-Session-Token), so other web pages in the browser cannot
 drive the server or spend API credit. API keys are write-only: held in this process's memory,
 keyed by (kind, base_url) so a key is never sent to a different endpoint, and never returned.
+
+Connection settings (model source, base URL, key, model, OpenRouter provider) are held once per
+process. Generation settings are not stored here: the page sends them with each /api/complete
+request (spec v6 §18.3).
 """
 from __future__ import annotations
 
@@ -23,8 +27,12 @@ import modelspell
 from modelspell import Cancelled, Endpoint, ModelSpellError
 
 INDEX = pathlib.Path(__file__).with_name("index.html")
-DEFAULT_SETTINGS = {"kind": "lmstudio", "base_url": "", "model": "", "provider": "", "reasoning": "",
-                    "max_tokens": None}
+DEFAULT_SETTINGS = {"kind": "lmstudio", "base_url": "", "model": "", "provider": ""}
+# The generation arguments the page may send with /api/complete. provider comes from the dialog.
+PAGE_SETTINGS = ("reasoning", "max_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty",
+                 "presence_penalty", "frequency_penalty", "seed", "stop")
+MOVED = ("reasoning", "max_tokens")  # accepted by /api/config before 0.2.0; now per request
+LEVELS = ("", "off", "low", "medium", "high")  # "" stands for None (backend default)
 
 
 class UIServer(ThreadingHTTPServer):
@@ -110,10 +118,17 @@ class Handler(BaseHTTPRequestHandler):
             key_set = bool(e._resolve_key())
         except ModelSpellError:
             key_set = False
-        return {**s.settings, "key_set": key_set, "version": modelspell.__version__}
+        kind = s.settings["kind"]
+        levels = ("",) if kind == "openai_compat" else LEVELS
+        supported = {lv: sorted(modelspell.supported_settings(kind, lv or None)) for lv in levels}
+        return {**s.settings, "key_set": key_set, "supported": supported, "version": modelspell.__version__}
 
     def _config(self, body: dict):
         s = self.server
+        moved = [k for k in MOVED if k in body]
+        if moved:
+            return self._send(400, {"error": f"{', '.join(moved)}: moved to the request panel; "
+                                             "send it with /api/complete"})
         new = {k: body.get(k, s.settings[k]) for k in DEFAULT_SETTINGS}
         e = Endpoint(kind=new["kind"], base_url=new["base_url"] or None)  # validates kind/base_url
         if "api_key" in body and body["api_key"] is not None:
@@ -135,12 +150,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def _complete(self, body: dict):
         s = self.server.settings
+        settings = body.get("settings", {})
+        if not isinstance(settings, dict):
+            return self._send(400, {"error": "settings must be a JSON object"})
+        unknown = sorted(set(settings) - set(PAGE_SETTINGS))
+        if unknown:
+            return self._send(400, {"error": f"unknown settings: {', '.join(unknown)}"})
         endpoint = self.server.endpoint({})
         messages = ([{"role": "system", "content": body["system"]}] if body.get("system") else []) + \
             [{"role": "user", "content": str(body.get("prompt") or "")}]
-        kwargs = dict(reasoning=s["reasoning"] or None, max_tokens=s["max_tokens"] or None,
-                      provider={"order": [s["provider"]], "allow_fallbacks": False}
-                      if s["provider"] and endpoint.kind == "openrouter" else None)
+        # Values pass to complete() unchanged; only null/absent are dropped and reasoning "" means None.
+        # Never `value or None`: that would drop explicit zeros (U10). modelSpell does all value checks.
+        kwargs = {k: v for k, v in settings.items() if v is not None and not (k == "reasoning" and v == "")}
+        if s["provider"] and endpoint.kind == "openrouter":
+            kwargs["provider"] = {"order": [s["provider"]], "allow_fallbacks": False}
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Cache-Control", "no-store")
@@ -160,7 +183,8 @@ class Handler(BaseHTTPRequestHandler):
                                          on_text=lambda t: emit({"type": "text", "text": t}),
                                          on_reasoning=lambda t: emit({"type": "reasoning", "text": t}),
                                          **kwargs)
-            emit({"type": "result", "result": _jsonable(result)})
+            # settings_sent: what was passed to complete() and sent, not a statement of what was applied
+            emit({"type": "result", "result": _jsonable(result), "settings_sent": kwargs})
         except Cancelled:
             return
         except ModelSpellError as exc:

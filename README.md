@@ -11,7 +11,7 @@ modelSpell is a **controlled adaptation** of the completion client in [NEL](http
 Install from a [GitHub release](https://github.com/alexchwong/modelSpell/releases). Each release attaches one wheel and gives its sha256 in the notes. In a downstream `pyproject.toml` or requirements file, pin it by URL and hash:
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.1.0/modelspell-0.1.0-py3-none-any.whl#sha256=<sha256 from the release notes>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.2.0/modelspell-0.2.0-py3-none-any.whl#sha256=<sha256 from the release notes>
 ```
 
 The wheel contains only the library; it has no dependencies and needs no build step. Releases are the supported install channel; installing from an arbitrary commit is unsupported. `modelspell.__version__` reports the installed version. Licensed under MIT (`LICENSE`).
@@ -22,7 +22,7 @@ Development, tests, the developer test UI and the release process are described 
 
 ```python
 from modelspell import (
-    complete, list_models, list_providers,
+    complete, list_models, list_providers, supported_settings, check_settings,
     Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing,
     ModelSpellError, ConfigError, UnsupportedSetting, UnsupportedOperation,
     AuthError, ConnectError, RequestTimeout, BackendError, ResponseFormatError, Cancelled,
@@ -30,7 +30,8 @@ from modelspell import (
 ```
 
 - `Endpoint(kind, base_url=None, api_key=None, api_key_env=None, headers=None)` — `kind` is `"lmstudio"`, `"openrouter"` or `"openai_compat"`. `base_url` is the OpenAI-compatible root **including `/v1`** (defaults: `http://localhost:1234/v1`, `https://openrouter.ai/api/v1`; required for `openai_compat`). OpenRouter's `api_key_env` defaults to `OPENROUTER_API_KEY`.
-- `complete(endpoint, model, input, *, reasoning=None, max_tokens=None, temperature=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**. Passing either callback streams the response; the returned `Result` is the same either way.
+- `complete(endpoint, model, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `supported_settings(kind, reasoning=None) -> frozenset[str]` and `check_settings(kind, *, reasoning=None, max_tokens=None, …, provider=None) -> None` — pure helpers for the generation settings; see below.
 - `list_models(endpoint, *, timeout=15.0) -> list[ModelInfo]` (all kinds) and `list_providers(endpoint, "author/slug", *, timeout=15.0) -> list[ProviderInfo]` (OpenRouter only). No caching.
 
 `complete()` never raises because the answer is empty or truncated: check `Result.text` and `Result.truncated`.
@@ -44,9 +45,68 @@ from modelspell import (
 | `openrouter` | any | `chat_completions` | `{base_url}/chat/completions` (`off` → `{"effort": "none"}`) |
 | `openai_compat` | `None` only | `chat_completions` | `{base_url}/chat/completions` |
 
-One `complete()` call makes exactly one HTTP request: no retries, no route fallback, no streaming→non-streaming fallback. `reasoning` on `openai_compat` and `provider` on non-OpenRouter kinds raise `UnsupportedSetting`.
+One `complete()` call makes exactly one HTTP request: no retries, no route fallback, no streaming→non-streaming fallback. `reasoning` on `openai_compat`, `provider` on non-OpenRouter kinds, and any sampling argument a route does not send raise `UnsupportedSetting`.
 
 Minimum LM Studio versions: **0.3.29** for `/v1/responses`; **0.4.0** for `reasoning="off"` and for `list_models`.
+
+### Generation settings
+
+The *generation settings* are `reasoning`, `max_tokens`, `temperature`, `provider` and eight sampling arguments: `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed` and `stop`. modelSpell sends each one under the field name of the route the request takes. **Supported** below means *modelSpell sends it on that route*, nothing more.
+
+| Argument | OpenRouter | LM Studio native (`reasoning="off"`) | LM Studio Responses (other reasoning) | `openai_compat` |
+|---|---|---|---|---|
+| `temperature` | `temperature` (≤ 2) | `temperature` (≤ 1) | `temperature` | `temperature` |
+| `max_tokens` | `max_tokens` | `max_output_tokens` | `max_output_tokens` | `max_tokens` |
+| `top_p` | `top_p` | `top_p` | — | `top_p` |
+| `top_k` | `top_k` | `top_k` | — | `top_k` (extension) |
+| `min_p` | `min_p` | `min_p` | — | `min_p` (extension) |
+| `repetition_penalty` | `repetition_penalty` (≤ 2) | `repeat_penalty` | — | — |
+| `presence_penalty` | `presence_penalty` (−2 to 2) | — | — | `presence_penalty` |
+| `frequency_penalty` | `frequency_penalty` (−2 to 2) | — | — | `frequency_penalty` |
+| `seed` | `seed` | — | — | `seed` |
+| `stop` | `stop` (array) | — | — | `stop` (array) |
+
+Ranges in brackets are the backend's documented limits for that route and are checked before sending. Every route also checks each setting's meaning: `top_p` and `min_p` in [0, 1]; `top_k` an `int` ≥ 0; `temperature` and `repetition_penalty` ≥ 0; `seed` any `int` (no range: llama-server uses −1 for random); `stop` a non-empty list or tuple of non-empty strings (a bare string is refused); every number finite (no `inf`/`nan`), and `bool` is never a number.
+
+**Verification status.** The table comes from each backend's documentation (checked 27 October 2026). The live compatibility check V2 (`tests/fixtures/README.md`) has **not yet been run** against any backend, so every row is currently **unverified** against a real server. No model- or provider-specific restrictions have been recorded yet.
+
+**Unsupported means refused, not dropped.** A non-`None` setting that the route does not send raises `UnsupportedSetting` before any network I/O, naming the setting and the route. modelSpell never accepts a setting and silently leaves it out.
+
+**LM Studio with reasoning enabled has no advanced sampling.** The Responses route (reasoning `None`, `low`, `medium`, `high`) takes `temperature` and `max_tokens` but none of the eight sampling arguments, because LM Studio's Responses documentation does not list which sampling fields it honours. This is modelSpell's contract, not a statement about what LM Studio can do. For advanced sampling on LM Studio use `reasoning="off"` (the native route), or send fields through `extra` at your own risk.
+
+**`openai_compat`.** `top_p`, `presence_penalty`, `frequency_penalty`, `seed` and `stop` are part of the standard Chat Completions shape. `top_k` and `min_p` are **extensions** (llama-server and vLLM use these names); a server that does not know them may refuse or ignore them. `repetition_penalty` is **not sent** on `openai_compat`, because servers disagree on its name (llama-server `repeat_penalty`, vLLM `repetition_penalty`); pass the right name through `extra` if you know your server.
+
+**Sent is not applied.** modelSpell guarantees only that a supported setting is *sent* under the right name. Whether it is applied depends on the backend, the model and, on OpenRouter, the provider:
+- On OpenRouter, a provider that does not support a parameter ignores it by default, with no error, even with a pinned provider and `allow_fallbacks: false`. Adding `"require_parameters": True` to `provider=` makes OpenRouter route only to providers that *declare* support for every parameter in the request. That establishes declared support, not proof that every sampler changes every model's output. modelSpell passes `provider` verbatim and never adds this flag itself.
+- On `openai_compat`, a server that does not know a field may refuse or ignore it.
+- On LM Studio's native route, behaviour for a model that cannot use a setting is undocumented.
+
+Nothing modelSpell returns claims a setting was applied.
+
+**`extra` still wins.** `extra` is merged last and can override a value the checks approved, or add fields a route does not send. That is unchanged from 0.1.0 and unvalidated.
+
+#### `supported_settings()` and `check_settings()`
+
+Both are pure: no endpoint, no key, no environment, no network. Both raise what `complete()` would raise for the same `kind` and `reasoning` (`ConfigError` for unknown values, `UnsupportedSetting` for `reasoning` on `openai_compat`).
+
+- `supported_settings(kind, reasoning)` returns the names modelSpell sends on the route for that `kind` and `reasoning`, e.g. `supported_settings("lmstudio", "off")` → `{"reasoning", "max_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty"}`. It says nothing about what a model or provider applies.
+- `check_settings(kind, *, reasoning=..., max_tokens=..., ..., provider=...)` runs exactly `complete()`'s generation-setting checks, from the same code, and raises the same exception with the same message. It does not check the endpoint, model, input, `extra`, `timeout` or callbacks, and never raises `AuthError`.
+
+Use `check_settings()` when you must refuse bad settings before committing to something, such as an HTTP status for a streamed response:
+
+```python
+from modelspell import ConfigError, UnsupportedSetting, check_settings, complete
+
+def handle(endpoint, model, prompt, settings, respond):
+    try:
+        check_settings(endpoint.kind, **settings)        # same kwargs you will pass to complete()
+    except (ConfigError, UnsupportedSetting) as exc:
+        return respond.status(400, str(exc))             # nothing sent upstream, no stream started
+    stream = respond.start_stream(200)
+    complete(endpoint, model, prompt, on_text=stream.write, **settings)   # will not refuse these settings
+```
+
+A pass means `complete()` will not refuse those settings. `complete()` can still raise for anything else: an invalid endpoint, a missing OpenRouter key, `extra`, or any error after sending.
 
 ### Per-subtask configuration
 
@@ -59,7 +119,8 @@ LOCAL = Endpoint(kind="lmstudio")
 CLOUD = Endpoint(kind="openrouter", api_key=key_from_ui)   # held in memory only
 
 TASKS = {
-    "extract": dict(endpoint=LOCAL, model="<lmstudio-model-key>", reasoning="off", max_tokens=4096),
+    "extract": dict(endpoint=LOCAL, model="<lmstudio-model-key>", reasoning="off", max_tokens=4096,
+                    top_k=20),                                  # advanced sampling needs reasoning="off" on LM Studio
     "review":  dict(endpoint=CLOUD, model="<author>/<model>", reasoning="high", max_tokens=16384,
                     provider={"order": ["<provider-slug>"], "allow_fallbacks": False}),
 }
@@ -70,6 +131,13 @@ def run(task: str, prompt: str):
 ```
 
 See `examples/basic.py` for discovery, a streamed call with live reasoning, and a repair-style follow-up.
+
+### Changes in 0.2.0 that can affect 0.1.0 callers
+
+Both raise `ConfigError` before sending; nothing else changes for calls that use none of the new arguments (same URLs, equal JSON bodies):
+
+1. **Non-finite numbers.** `temperature=float("inf")` now raises. In 0.1.0 it produced an invalid JSON body (`Infinity`); NaN was already refused.
+2. **Documented `temperature` ranges.** Above 2 on OpenRouter, or above 1 on LM Studio's native route (`reasoning="off"`), now raises. Before, the backend decided.
 
 ## Behaviour you should know about
 

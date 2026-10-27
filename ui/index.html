@@ -31,6 +31,15 @@
   .inline { display:flex; gap:8px; } .inline > :first-child { flex:1; }
   .hidden { display:none; }
   details pre { min-height:0; }
+  #gen { border:1px solid var(--line); border-radius:8px; padding:4px 12px 8px; margin-top:10px; }
+  .fields { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:0 12px; }
+  .fields label { margin-top:8px; }
+  .why { display:block; font-size:11px; color:var(--muted); min-height:1em; }
+  input:disabled, textarea:disabled, select:disabled { opacity:.55; }
+  #advanced { margin-top:8px; }
+  #advanced > summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  .note { color:var(--muted); font-size:12px; }
+  #stop_seqs { min-height:0; }
 </style>
 </head>
 <body>
@@ -44,6 +53,37 @@
 <textarea id="system" rows="2"></textarea>
 <label for="prompt">Input</label>
 <textarea id="prompt" rows="6" placeholder="Ctrl+Enter to send"></textarea>
+
+<div id="gen">
+  <div class="fields">
+    <div id="reasoning-field">
+      <label for="g-reasoning">Reasoning</label>
+      <select id="g-reasoning">
+        <option value="">Backend default</option><option value="off">off</option>
+        <option value="low">low</option><option value="medium">medium</option><option value="high">high</option>
+      </select>
+    </div>
+    <div><label for="g-temperature">Temperature</label><input id="g-temperature" inputmode="decimal" autocomplete="off"><span class="why" id="why-temperature"></span></div>
+    <div><label for="g-max_tokens">Max tokens</label><input id="g-max_tokens" inputmode="numeric" autocomplete="off"><span class="why" id="why-max_tokens"></span></div>
+  </div>
+  <details id="advanced">
+    <summary id="adv-summary">Advanced</summary>
+    <div class="fields">
+      <div><label for="g-top_p">Top-p</label><input id="g-top_p" inputmode="decimal" autocomplete="off"><span class="why" id="why-top_p"></span></div>
+      <div><label for="g-top_k">Top-k</label><input id="g-top_k" inputmode="numeric" autocomplete="off"><span class="why" id="why-top_k"></span></div>
+      <div><label for="g-min_p">Min-p</label><input id="g-min_p" inputmode="decimal" autocomplete="off"><span class="why" id="why-min_p"></span></div>
+      <div><label for="g-repetition_penalty">Repetition penalty</label><input id="g-repetition_penalty" inputmode="decimal" autocomplete="off"><span class="why" id="why-repetition_penalty"></span></div>
+      <div><label for="g-presence_penalty">Presence penalty</label><input id="g-presence_penalty" inputmode="decimal" autocomplete="off"><span class="why" id="why-presence_penalty"></span></div>
+      <div><label for="g-frequency_penalty">Frequency penalty</label><input id="g-frequency_penalty" inputmode="decimal" autocomplete="off"><span class="why" id="why-frequency_penalty"></span></div>
+      <div><label for="g-seed">Seed</label><input id="g-seed" inputmode="numeric" autocomplete="off"><span class="why" id="why-seed"></span></div>
+    </div>
+    <label for="g-stop">Stop sequences (one per line)</label>
+    <textarea id="g-stop" rows="2"></textarea><span class="why" id="why-stop"></span>
+  </details>
+  <div class="row"><button type="button" id="reset">Reset</button>
+    <span class="note">Blank fields are not sent. Settings are sent as shown; whether the model applies them is up to the backend.</span></div>
+</div>
+
 <div class="row">
   <button id="send" class="primary">Send</button>
   <button id="stop" disabled>Stop</button>
@@ -54,7 +94,7 @@
   <div><label>Reasoning stream</label><pre id="reasoning"></pre></div>
   <div><label>Output</label><pre id="output"></pre></div>
 </div>
-<details><summary>Result (JSON)</summary><pre id="result"></pre></details>
+<details><summary>Result (JSON, with settings sent)</summary><pre id="result"></pre></details>
 
 <dialog id="settings">
   <form method="dialog" id="settings-form">
@@ -78,15 +118,6 @@
       <div class="inline"><select id="provider"><option value="">Any (OpenRouter routing)</option></select>
         <button type="button" id="load-providers">Load providers</button></div>
     </div>
-    <div id="reasoning-row">
-      <label for="reasoning_level">Reasoning</label>
-      <select id="reasoning_level">
-        <option value="">Backend default</option><option value="off">off</option>
-        <option value="low">low</option><option value="medium">medium</option><option value="high">high</option>
-      </select>
-    </div>
-    <label for="max_tokens">Max tokens (blank = backend default)</label>
-    <input id="max_tokens" type="number" min="1">
     <p id="settings-msg" class="hidden"></p>
     <div class="row" style="justify-content:flex-end">
       <button value="cancel" formnovalidate>Cancel</button>
@@ -100,6 +131,12 @@ const TOKEN = new URLSearchParams(location.search).get("t") || "";
 const $ = (id) => document.getElementById(id);
 const DEFAULT_URL = { lmstudio: "http://localhost:1234/v1", openrouter: "https://openrouter.ai/api/v1", openai_compat: "required" };
 let state = {}, clearKey = false, controller = null;
+// Generation settings (spec v6 §18.3): per tab, per request, never saved.
+const NUMERIC = ["temperature", "max_tokens", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty",
+                 "frequency_penalty", "seed"];
+const INTEGER = new Set(["max_tokens", "top_k", "seed"]);
+const ADVANCED = ["top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty", "seed", "stop"];
+const FIELDS = [...NUMERIC, "stop"];
 
 async function api(path, body) {
   const r = await fetch(path, { method: body === undefined ? "GET" : "POST",
@@ -116,8 +153,6 @@ function renderState() {
   $("version").textContent = state.version ? "v" + state.version : "";
   const parts = [state.kind, state.base_url || "(default URL)", state.model || "(no model)"];
   if (state.kind === "openrouter") parts.push("provider=" + (state.provider || "any"));
-  if (state.reasoning) parts.push("reasoning=" + state.reasoning);
-  if (state.max_tokens) parts.push("max_tokens=" + state.max_tokens);
   parts.push(state.key_set ? "key: set" : "key: none");
   $("summary").textContent = parts.join(" · ");
 }
@@ -126,15 +161,64 @@ function syncDialogVisibility() {
   const kind = $("kind").value;
   $("base_url").placeholder = DEFAULT_URL[kind];
   $("provider-row").classList.toggle("hidden", kind !== "openrouter");
-  $("reasoning-row").classList.toggle("hidden", kind === "openai_compat");
 }
 
+// --- request panel -------------------------------------------------------------------------
+function level() { return state.kind === "openai_compat" ? "" : $("g-reasoning").value; }
+function sentNow() { return new Set(((state.supported || {})[level()]) || []); }
+function sentAtSomeLevel(name) { return Object.values(state.supported || {}).some((names) => names.includes(name)); }
+
+function stopValue() {  // null = not sent
+  const raw = $("g-stop").value;
+  if (!raw.trim()) return null;
+  const seqs = raw.split("\n").map((l) => l.replace(/\r$/, "")).filter((l) => l !== "");
+  return seqs.length ? seqs : null;
+}
+function hasValue(name) { return name === "stop" ? stopValue() !== null : $("g-" + name).value.trim() !== ""; }
+
+function refreshFields() {
+  $("reasoning-field").classList.toggle("hidden", state.kind === "openai_compat");
+  const sent = sentNow();
+  let set = 0, notSent = 0;
+  for (const name of FIELDS) {
+    const ok = sent.has(name);
+    $("g-" + name).disabled = !ok;  // keeps its value, so switching back restores it
+    $("why-" + name).textContent = ok ? "" :
+      (sentAtSomeLevel(name) ? "not sent at this reasoning level" : "not sent with this model source");
+    if (ADVANCED.includes(name) && hasValue(name)) { set++; if (!ok) notSent++; }
+  }
+  $("adv-summary").textContent = "Advanced" + (set ? ` (${set} set${notSent ? `, ${notSent} not sent` : ""})` : "");
+}
+
+// Refuses only what JavaScript/JSON would change silently; modelSpell checks everything else.
+function collectSettings() {
+  const sent = sentNow(), out = {};
+  if (state.kind !== "openai_compat" && $("g-reasoning").value) out.reasoning = $("g-reasoning").value;
+  for (const name of NUMERIC) {
+    const raw = $("g-" + name).value.trim();
+    if (!sent.has(name) || !raw) continue;
+    const v = Number(raw);
+    if (Number.isNaN(v)) throw new Error(`${name}: "${raw}" is not a number; nothing sent`);
+    if (!Number.isFinite(v)) throw new Error(`${name}: ${raw} is not a finite number; nothing sent`);
+    if (INTEGER.has(name) && !Number.isSafeInteger(v)) throw new Error(`${name}: ${raw} is not a safe integer; nothing sent`);
+    out[name] = v;
+  }
+  if (sent.has("stop")) { const seqs = stopValue(); if (seqs) out.stop = seqs; }
+  return out;
+}
+
+$("g-reasoning").onchange = refreshFields;
+for (const name of FIELDS) $("g-" + name).addEventListener("input", refreshFields);
+$("reset").onclick = () => {
+  $("g-reasoning").value = "";
+  for (const name of FIELDS) $("g-" + name).value = "";
+  refreshFields();
+};
+
 function dialogConfig() {
-  const kind = $("kind").value, max = parseInt($("max_tokens").value, 10);
+  const kind = $("kind").value;
   const cfg = { kind, base_url: $("base_url").value.trim(), model: $("model").value.trim(),
-    provider: kind === "openrouter" ? $("provider").value : "",
-    reasoning: kind === "openai_compat" ? "" : $("reasoning_level").value,
-    max_tokens: Number.isFinite(max) && max > 0 ? max : null };
+    provider: kind === "openrouter" ? $("provider").value : "" };
   if ($("api_key").value) cfg.api_key = $("api_key").value; else if (clearKey) cfg.api_key = "";
   return cfg;
 }
@@ -143,7 +227,6 @@ function settingsMsg(text) { $("settings-msg").textContent = text; $("settings-m
 
 $("open-settings").onclick = () => {
   $("kind").value = state.kind; $("base_url").value = state.base_url || ""; $("model").value = state.model || "";
-  $("reasoning_level").value = state.reasoning || ""; $("max_tokens").value = state.max_tokens || "";
   $("api_key").value = ""; clearKey = false; $("key-state").textContent = state.key_set ? "(set)" : "(not set)";
   const p = $("provider"); p.length = 1;
   if (state.provider) p.add(new Option(state.provider, state.provider, true, true));
@@ -180,11 +263,13 @@ $("load-providers").onclick = async () => {
 };
 
 $("save").onclick = async () => {
-  try { state = await api("/api/config", dialogConfig()); renderState(); $("settings").close(); }
+  try { state = await api("/api/config", dialogConfig()); renderState(); refreshFields(); $("settings").close(); }
   catch (e) { settingsMsg(e.message); }
 };
 
 async function send() {
+  let settings;
+  try { settings = collectSettings(); } catch (e) { setStatus(e.message, true); return; }
   $("reasoning").textContent = ""; $("output").textContent = ""; $("result").textContent = "";
   $("send").disabled = true; $("stop").disabled = false; setStatus("waiting for first token…");
   controller = new AbortController();
@@ -192,7 +277,7 @@ async function send() {
   try {
     const r = await fetch("/api/complete", { method: "POST", signal: controller.signal,
       headers: { "X-Session-Token": TOKEN, "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: $("prompt").value, system: $("system").value }) });
+      body: JSON.stringify({ prompt: $("prompt").value, system: $("system").value, settings }) });
     if (!r.ok) throw new Error((await r.json()).error || r.statusText);
     const reader = r.body.getReader(), decoder = new TextDecoder();
     let buffer = "";
@@ -207,7 +292,8 @@ async function send() {
         else if (ev.type === "text") { $("output").textContent += ev.text; setStatus("streaming…"); }
         else if (ev.type === "result") {
           const res = ev.result, u = res.usage || {};
-          $("result").textContent = JSON.stringify(res, null, 2);
+          $("result").textContent = "Settings sent (not a statement of what the model applied)\n" +
+            JSON.stringify(ev.settings_sent || {}, null, 2) + "\n\nResult\n" + JSON.stringify(res, null, 2);
           setStatus([`${((performance.now() - started) / 1000).toFixed(1)}s`, res.transport,
             `finish=${res.finish_reason}`, res.truncated ? "TRUNCATED" : null,
             `in=${u.input_tokens ?? "?"} out=${u.output_tokens ?? "?"}` + (u.reasoning_tokens != null ? ` reasoning=${u.reasoning_tokens}` : ""),
@@ -224,7 +310,7 @@ $("send").onclick = send;
 $("stop").onclick = () => { if (controller) { controller.abort(); setStatus("stopping…"); } };
 $("prompt").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); });
 
-api("/api/state").then((s) => { state = s; renderState(); }).catch((e) => setStatus(e.message, true));
+api("/api/state").then((s) => { state = s; renderState(); refreshFields(); }).catch((e) => setStatus(e.message, true));
 </script>
 </body>
 </html>
