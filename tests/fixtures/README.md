@@ -58,13 +58,27 @@ Check every captured file for the key before committing it. Add a row below with
 
 ## Verification V2 (spec v6 §17)
 
+**Attempted, not verified (27 Oct 2026).** An OpenRouter run with `qwen/qwen3.8-27b` pinned to
+`darkbloom/fp4` returned HTTP 404 for all 22 requests. Account guardrails (zero data retention)
+removed every provider. All records are `unrelated`, and the run verifies nothing. OpenRouter
+therefore stays **not verified**. The skipped rows below retain the original implementation
+environment's status; this unsuccessful attempt does not replace them with verification.
+
 **Not run** (27 Oct 2026, package 0.2.0) — no LM Studio instance, no `OPENROUTER_API_KEY` and no llama-server were available in the implementation environment. Every backend is therefore **skipped**, every row of the support and range tables (spec v6 §6.7, §6.8.2) ships as documented, and the README marks them unverified. Nothing here may be described as verification until the checks below are run.
 
 Run with `python -m pytest -m live -s -k v2` (variables in `DEVEL.md`). Paste each printed `V2 {...}` line, then classify every `refused` record as a route limitation, a model or provider limitation, or an unrelated failure, and record what (if anything) changed.
 
 | Backend | Version | Route | Model / provider | Status |
 |---|---|---|---|---|
-| OpenRouter | — | chat_completions | — | skipped: no `OPENROUTER_API_KEY` |
+| OpenRouter | n/a (hosted) | chat_completions | qwen/qwen3-coder-next, pinned `parasail/bf16` (first listed), no fallbacks, no `require_parameters` | **run 27 Oct 2026** |
 | LM Studio | — | lmstudio_native | — | skipped: no LM Studio instance |
 | LM Studio | — | responses | — | skipped: no LM Studio instance |
 | llama-server (`openai_compat`) | — | chat_completions | — | skipped: no llama-server |
+
+OpenRouter, 27 Oct 2026: all 10 supported settings `accepted` (served by Parasail), effect unverified.
+Range probes through `extra`: boundary values accepted (temperature 2, repetition_penalty 2,
+presence_penalty and frequency_penalty -2 and 2); values just outside refused with HTTP 400 by
+OpenRouter itself (`provider_name: null`), naming the parameter and limit. Classification: expected
+refusals of out-of-range values, not route limitations. No change to the support or range tables.
+An earlier run the same day (qwen/qwen3.8-27b, `darkbloom/fp4`) was unrelated throughout: HTTP 404,
+every provider removed by the account's zero-data-retention guardrails. It verifies nothing.

@@ -67,6 +67,27 @@ Changes under `modelspell/` must keep these; tests enforce most of them.
 - **The public API is exactly `modelspell.__all__`** (K1). Field changes to public dataclasses
   update the spec and the K1 snapshot together.
 
+### Overloaded `provider` terminology
+
+`provider` has different meanings depending on context:
+
+- In `complete(provider=...)` and `check_settings(provider=...)`, it is an OpenRouter routing
+  mapping, such as `{"order": ["deepinfra/turbo"], "allow_fallbacks": False}`.
+- `Result.provider` is the provider string reported by the response, not a routing mapping or
+  necessarily the endpoint slug requested by the caller.
+- `ProviderInfo.name` is a display name; `ProviderInfo.slug` is the endpoint tag used for routing.
+  Do not derive a slug from the display name or assume they are interchangeable.
+- The UI connection setting `provider` stores a selected endpoint slug and is converted into a
+  routing mapping before calling `complete()`.
+- In V2 evidence, `provider` records the requested endpoint pin, while `served_by` records
+  `Result.provider` from the response.
+
+Keep evidence metadata separate from completion arguments in helper interfaces. Flattening both
+into one keyword namespace can collide on `provider`; a metadata parameter named `provider` can
+also consume the routing argument instead of forwarding it. Prefer explicit metadata mappings
+and internal names such as `provider_slug` for endpoint identifiers. Preserve the public API and
+wire-field names; their context and types distinguish their meanings.
+
 ## Tests
 
 ```bash
@@ -84,7 +105,7 @@ checked on its own:
 | Backend | Variables |
 |---|---|
 | LM Studio | `MODELSPELL_LIVE_LMSTUDIO_URL` (e.g. `http://localhost:1234/v1`), `MODELSPELL_LIVE_LMSTUDIO_MODEL` |
-| OpenRouter | `OPENROUTER_API_KEY`, `MODELSPELL_LIVE_OPENROUTER_MODEL` (`author/slug`) |
+| OpenRouter | `OPENROUTER_API_KEY`, `MODELSPELL_LIVE_OPENROUTER_MODEL` (`author/slug`); optional `MODELSPELL_LIVE_OPENROUTER_PROVIDER` (provider slug from `list_providers`; default: first listed provider with a slug) |
 | llama-server (V2 only, as `openai_compat`) | `MODELSPELL_LIVE_LLAMASERVER_URL` (including `/v1`), `MODELSPELL_LIVE_LLAMASERVER_MODEL` |
 
 Run verification V1 with
@@ -94,6 +115,23 @@ and record the printed evidence in `tests/fixtures/README.md`.
 **Verification V2** (spec v6 §17) checks the generation-settings tables against real servers
 before a release that changes them. Run `python -m pytest -m live -s -k v2`. Each call prints one
 `V2 {...}` JSON line with backend, version, route, model, provider, setting, value and outcome.
+
+OpenRouter accounts with privacy settings or guardrails should pin an allowed provider with
+`MODELSPELL_LIVE_OPENROUTER_PROVIDER`. Its value must exactly match a slug returned by
+`list_providers`; an invalid value fails without falling back to another provider. OpenRouter
+records include `pin_source` (`env` or `first_listed`). Discovery does not guarantee that account
+guardrails allow a listed provider.
+
+A run in which no supported setting is accepted fails after all probes have printed. Re-run it;
+it verifies nothing and must not be recorded as verification evidence. This acceptance check
+uses only supported-setting probes, not `extra` probes, which may legitimately be refused.
+Partial unrelated failures still need human classification even when the acceptance check passes.
+
+The V2 attempt helper takes evidence in an explicit `meta` mapping, separate from completion
+arguments, so the evidence's provider slug cannot collide with or consume request routing.
+Offline regression checks in `tests/test_live_helpers.py` cover supported-setting and `extra`
+probes on all routes, including provider forwarding and printed evidence. Run them with
+`python -m pytest tests/test_live_helpers.py`; they require no live credentials.
 
 - `accepted` means the request succeeded; it never means the setting was applied
   (`effect_unverified`). `refused` is a 4xx attributable to the request; `unrelated` is auth,
