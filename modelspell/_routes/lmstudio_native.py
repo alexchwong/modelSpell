@@ -19,13 +19,19 @@ def flatten(messages: list[dict]) -> tuple[str | None, str]:
     return system_prompt or None, user_input
 
 
-def build_body(messages, model, *, reasoning, max_tokens, temperature, provider, streaming, kind) -> dict:
+# Support table (spec v6 §6.7): generation argument -> wire name on POST /api/v1/chat.
+FIELDS = {"temperature": "temperature", "max_tokens": "max_output_tokens", "top_p": "top_p", "top_k": "top_k",
+          "min_p": "min_p", "repetition_penalty": "repeat_penalty"}
+RANGES = {"temperature": (None, 1)}  # spec v6 §6.8.2
+LABEL = 'the LM Studio native route (reasoning="off")'
+
+
+def build_body(messages, model, *, reasoning, provider, settings, streaming, kind) -> dict:
     system_prompt, user_input = flatten(messages)
     body = {"model": model, "input": user_input, "reasoning": "off", "store": False, "stream": streaming}
-    if temperature is not None:
-        body["temperature"] = temperature
-    if max_tokens is not None:
-        body["max_output_tokens"] = max_tokens
+    for arg, wire in FIELDS.items():
+        if settings.get(arg) is not None:
+            body[wire] = settings[arg]
     if system_prompt is not None:
         body["system_prompt"] = system_prompt
     return body

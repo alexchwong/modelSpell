@@ -1,4 +1,14 @@
 # NEWS
+## 0.2.0
+- `complete()` adds `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed` and `stop`.
+- Each setting is sent under the route's field name; LM Studio native sends `repeat_penalty`.
+- Settings a route does not support raise `UnsupportedSetting` before sending; nothing is dropped silently.
+- New `supported_settings(kind, reasoning)` lists the generation arguments modelSpell sends on a route.
+- New `check_settings(kind, ...)` runs `complete()`'s setting checks without a key or network call.
+- Setting values are checked before sending, including documented per-route ranges for `temperature`.
+- Infinite or NaN numeric settings now raise `ConfigError` instead of sending invalid JSON.
+- `temperature` above 1 on LM Studio's native route, or above 2 on OpenRouter, now raises.
+
 ## 0.1.0
 - First release: one `complete()` call for LM Studio, OpenRouter and OpenAI-compatible servers.
 - Returns answer, reasoning, normalised token usage and OpenRouter cost in one `Result`.

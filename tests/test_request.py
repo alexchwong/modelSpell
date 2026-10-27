@@ -1,4 +1,4 @@
-"""Request construction: R1–R9 (spec §12.3)."""
+"""Request construction: R1–R9 (spec §12.3; R1, R2, R4, R5 extended in spec v6). R10–R16: test_settings.py."""
 import json
 import pathlib
 
@@ -51,6 +51,24 @@ def test_r2_none_args_omitted(server, kind, reasoning):
         assert k not in body
     if reasoning is None:
         assert "reasoning" not in body
+    for k in ("top_p", "top_k", "min_p", "repetition_penalty", "repeat_penalty", "presence_penalty",
+              "frequency_penalty", "seed", "stop"):
+        assert k not in body
+
+
+ZEROS = dict(temperature=0, top_k=0, min_p=0, presence_penalty=0, seed=0)
+
+
+@pytest.mark.parametrize("kind,reasoning,names", [
+    ("openrouter", None, list(ZEROS)),
+    ("openai_compat", None, list(ZEROS)),
+    ("lmstudio", "off", ["temperature", "top_k", "min_p"]),
+    ("lmstudio", None, ["temperature"]),
+])
+def test_r2_zero_is_a_value(server, kind, reasoning, names):
+    body = run(server, kind, reasoning=reasoning, **{n: ZEROS[n] for n in names})["body"]
+    for n in names:
+        assert body[n] == 0 and body[n] is not False, n
 
 
 @pytest.mark.parametrize("kind", ["lmstudio", "openrouter", "openai_compat"])
@@ -87,6 +105,16 @@ def test_r4_extra_overrides_last_and_never_changes_route(server):
             complete(ep(server, "openai_compat"), "m", "x", extra=bad)
 
 
+def test_r4_extra_overrides_new_settings_and_may_add_unsupported_fields(server):
+    assert run(server, "openrouter", top_k=40, extra={"top_k": 5})["body"]["top_k"] == 5
+    server.requests.clear()
+    body = run(server, "openai_compat", extra={"repeat_penalty": 1.1})["body"]
+    assert body["repeat_penalty"] == 1.1
+    server.requests.clear()
+    # extra may override a value the setting checks approved (backward compatible; §6.4)
+    assert run(server, "openrouter", temperature=1.0, extra={"temperature": 3})["body"]["temperature"] == 3
+
+
 BAD_CALLS = [
     ("openai_compat", dict(model="")), ("openai_compat", dict(reasoning="max")),
     ("openai_compat", dict(max_tokens=0)), ("openai_compat", dict(max_tokens=True)), ("openai_compat", dict(max_tokens=1.5)),
@@ -96,6 +124,11 @@ BAD_CALLS = [
     ("openai_compat", dict(timeout=0)), ("openai_compat", dict(timeout=True)),
     ("openai_compat", dict(on_text="nope")), ("openai_compat", dict(on_reasoning=1)),
     ("openai_compat", dict(input=[])), ("openrouter", dict(endpoint_key=None)),
+    # spec v6 additions (R10–R13 cover these exhaustively in test_settings.py)
+    ("openai_compat", dict(temperature=float("inf"))), ("openai_compat", dict(temperature=float("nan"))),
+    ("openrouter", dict(temperature=2.5)), ("lmstudio", dict(reasoning="off", temperature=1.5)),
+    ("lmstudio", dict(top_k=40)), ("openai_compat", dict(repetition_penalty=1.1)),
+    ("openrouter", dict(stop="END")), ("openrouter", dict(top_p=1.5)),
 ]
 
 

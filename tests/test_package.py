@@ -1,4 +1,4 @@
-"""Packaging and concurrency: K1–K6 (spec §12.8)."""
+"""Packaging and concurrency: K1–K6 (spec §12.8; K1 updated in spec v6)."""
 import dataclasses
 import importlib.util
 import pathlib
@@ -31,7 +31,7 @@ FIELDS = {
 
 def test_k1_public_api():
     assert modelspell.__all__ == [
-        "complete", "list_models", "list_providers",
+        "complete", "list_models", "list_providers", "supported_settings", "check_settings",
         "Endpoint", "Message", "Result", "Usage", "ModelInfo", "ProviderInfo", "Pricing",
         "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",
         "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError", "Cancelled"]
