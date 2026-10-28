@@ -71,9 +71,9 @@ Run with `python -m pytest -m live -s -k v2` (variables in `DEVEL.md`). Paste ea
 | Backend | Version | Route | Model / provider | Status |
 |---|---|---|---|---|
 | OpenRouter | n/a (hosted) | chat_completions | qwen/qwen3-coder-next, pinned `parasail/bf16` (first listed), no fallbacks, no `require_parameters` | **run 27 Oct 2026** |
-| LM Studio | — | lmstudio_native | — | skipped: no LM Studio instance |
-| LM Studio | — | responses | — | skipped: no LM Studio instance |
-| llama-server (`openai_compat`) | — | chat_completions | — | skipped: no llama-server |
+| LM Studio | 0.4.21 (Build 2) | lmstudio_native | qwen3.8-27b | **run 28 Oct 2026** |
+| LM Studio | 0.4.21 (Build 2) | responses | qwen3.8-27b | **run 28 Oct 2026** |
+| llama-server (`openai_compat`) | b9910-f5525f7e7 | chat_completions | qwen3-coder-next | **run 28 Oct 2026** |
 
 OpenRouter, 27 Oct 2026: all 10 supported settings `accepted` (served by Parasail), effect unverified.
 Range probes through `extra`: boundary values accepted (temperature 2, repetition_penalty 2,
@@ -82,3 +82,21 @@ OpenRouter itself (`provider_name: null`), naming the parameter and limit. Class
 refusals of out-of-range values, not route limitations. No change to the support or range tables.
 An earlier run the same day (qwen/qwen3.8-27b, `darkbloom/fp4`) was unrelated throughout: HTTP 404,
 every provider removed by the account's zero-data-retention guardrails. It verifies nothing.
+
+LM Studio native (reasoning "off"), 28 Oct 2026: all 6 supported settings `accepted`, effect
+unverified. Range probe through `extra`: temperature 1 accepted; 1.01 refused with HTTP 400 by
+LM Studio's request validation (`param: temperature`, `code: too_big`). Classification: expected
+refusal of an out-of-range value. No table change.
+
+LM Studio Responses (reasoning "low"), 28 Oct 2026: `max_tokens` and `temperature` `accepted`.
+The 8 settings modelSpell does not send on this route were all `accepted` when forced through
+`extra`; whether LM Studio applies or silently drops them is not established. No table change
+(spec v6 §6.8.2: acceptance alone is not evidence).
+
+llama-server, 28 Oct 2026: all 9 supported settings `accepted`, effect unverified. Probes through
+`extra`: `repetition_penalty` and `repeat_penalty` both `accepted`. Source check at f5525f7
+(tools/server/server-schema.cpp): every name modelSpell sends is a schema field (`max_tokens` is an
+alias of `n_predict`); `repeat_penalty` is a field with no aliases; fields outside the schema are
+ignored without error. So `repetition_penalty` is accepted and silently ignored. Classification: no
+route limitation; M2-3's exclusion of `repetition_penalty` on `openai_compat` confirmed. No table
+change. This verifies llama-server only, not other `openai_compat` servers.
