@@ -93,8 +93,12 @@ def _supported(kind: str, route: _Route) -> frozenset[str]:
 
 
 def _unsupported_message(name: str, route: _Route) -> str:
-    if route.module is responses:
-        return f'{name} is not supported on {route.label}; use reasoning="off" or pass it through extra'
+    if route.module is responses:  # spec v7 §6.7.2 (M21-5): suggest reasoning="off" only where it helps
+        if name in lmstudio_native.FIELDS:
+            return (f'{name} is not supported on {route.label}; use reasoning="off", '
+                    "or pass it through extra (effect unverified)")
+        return (f"{name} is not supported on {route.label} or the LM Studio native route; "
+                "pass it through extra (effect unverified)")
     return f"{name} is not supported on {route.label}; pass it through extra"
 
 

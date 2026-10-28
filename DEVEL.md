@@ -1,7 +1,7 @@
 # Developer guide
 
 This file is for repository maintenance. Library usage is documented in `README.md`; the
-behavioural contract is `docs/modelspell_v1_spec_v6.md`; agent operating rules are in
+behavioural contract is `docs/modelspell_v1_spec_v7.md`; agent operating rules are in
 `.clinerules`. Nothing in this guide, `.clinerules`, `tests/`, `ui/`, `scripts/`, `examples/`
 or `docs/` ships in the release wheel.
 
@@ -36,12 +36,12 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 | `modelspell/` | yes | The library. Import name `modelspell`; distribution name `modelSpell`. |
 | `modelspell/_version.py` | yes | Single source of the version (`__version__ = "X.Y.Z"`). |
 | `pyproject.toml`, `README.md`, `LICENSE` | metadata | Packaging, wheel description, MIT license. |
-| `tests/` | no | Offline suite, fixtures, golden request bodies, opt-in live suite. |
+| `tests/` | no | Offline suite, fixtures, golden request bodies, opt-in live suite, and the LM Studio probe diagnostic (`tests/probe_lmstudio.py`). |
 | `ui/` | no | Developer test UI (`python -m ui`). |
 | `scripts/build_release.py` | no | Builds and verifies the release wheel. |
 | `scripts/smoke_installed.py` | no | Smoke test run against an installed wheel (K3, `--smoke`). |
 | `examples/basic.py` | no | Usage example against a local LM Studio. |
-| `docs/` | no | Spec v6 (authoritative), spec v5 (superseded, kept as history) and design history (informative). |
+| `docs/` | no | Spec v7 (authoritative), specs v5 and v6 (superseded, kept as history) and design history (informative). |
 | `.clinerules` | no | Agent operating rules; process detail lives in this guide. |
 | `.gitattributes` | no | Line-ending policy (`* text=auto eol=lf`). |
 | `.github/workflows/` | no | `tests.yml` (push, PR) and `release.yml` (push to `main`). |
@@ -112,7 +112,7 @@ Run verification V1 with
 `python -m pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip`
 and record the printed evidence in `tests/fixtures/README.md`.
 
-**Verification V2** (spec v6 §17) checks the generation-settings tables against real servers
+**Verification V2** (spec v7 §17) checks the generation-settings tables against real servers
 before a release that changes them. Run `python -m pytest -m live -s -k v2`. Each call prints one
 `V2 {...}` JSON line with backend, version, route, model, provider, setting, value and outcome.
 
@@ -139,10 +139,25 @@ probes on all routes, including provider forwarding and printed evidence. Run th
 - A refused *supported* setting fails the test. Classify it before release as a route limitation
   (same refusal across models/providers, or documented: move the setting to "—" for that route),
   a model or provider limitation (record it; the README lists it; the table does not change), or
-  unrelated. Ranges change only on the evidence rule in spec v6 §6.8.2.
+  unrelated. Ranges change only on the evidence rule in spec v7 §6.8.2.
 - Paste the records and the classification into `tests/fixtures/README.md`. A backend that was
   not available is recorded as skipped with the reason, and its README rows stay marked
   unverified; never describe a skipped check, or one `openai_compat` server, as verification.
+
+Live checks record acceptance and refusal only, never model behaviour: sampled output is not
+reproducible, so no release, table or README claim is decided from it (spec v7 §17, M21-3).
+
+**LM Studio probe (a diagnostic, not a test).** `tests/probe_lmstudio.py` sends one small set of
+requests per generation setting to LM Studio and prints what came back, with a plain summary and
+reading hints. It gives no verdicts, pytest does not run it, and nothing depends on its output.
+
+```bash
+python tests/probe_lmstudio.py --reasoning off 2>&1 | tee probe-off.txt   # native route
+python tests/probe_lmstudio.py --reasoning low 2>&1 | tee probe-low.txt   # Responses route
+```
+
+It uses the LM Studio live variables, or `--url` and `--model`; `--help` lists the options.
+`tests/test_probe_lmstudio.py` checks offline only what it sends and prints.
 
 **Fixtures.** `tests/fixtures/README.md` holds the capture procedure and the coverage table. All
 current fixtures are synthetic. When you capture a real response, check it for your key
@@ -211,11 +226,14 @@ backend or a fake one:
 
 The spec is the contract. A behaviour change updates, in the same change:
 
-1. `docs/modelspell_v1_spec_v6.md` (or a new spec version), including §14 if it deviates from NEL;
+1. `docs/modelspell_v1_spec_v7.md` (or a new spec version), including §14 if it deviates from NEL;
 2. the tests named in the spec for that behaviour;
 3. `README.md` where it documents the behaviour;
 4. `NEWS.md` under the next version;
 5. `docs/modelspell_design_history.md`, if the change records a design decision.
+
+A setting is sent on a route only if the route's documentation defines it, directly or through
+the reference that documentation points to for fields it does not list (spec v7 §7.2, M21-2).
 
 ## Branches and releases
 

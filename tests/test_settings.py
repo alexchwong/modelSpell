@@ -1,4 +1,4 @@
-"""Generation settings: R10–R16 (spec v6 §12.3; modelSpell 0.2.0 tech spec v3 Section 8.1).
+"""Generation settings: R10–R16 (spec v7 §12.3; modelSpell 0.2.1 tech spec v6 Section 7.2).
 
 R10 unsupported settings, R11 value checks, R12 finiteness, R13 route ranges, R14 supported_settings(),
 R15 stop tuples, R16 check_settings() agreement with complete(). Every refusal sends zero requests (R5).
@@ -20,8 +20,8 @@ VALID = dict(max_tokens=16, temperature=0.5, top_p=0.5, top_k=5, min_p=0.1, repe
 ROUTES = [("lmstudio", r) for r in (None, "off", "low", "medium", "high")] + \
          [("openrouter", r) for r in (None, "off", "low", "medium", "high")] + [("openai_compat", None)]
 
-_RESP = {"reasoning", "max_tokens", "temperature"}
-_NATIVE = _RESP | {"top_p", "top_k", "min_p", "repetition_penalty"}
+_RESP = {"reasoning", "max_tokens", "temperature", "top_p"}  # top_p added in 0.2.1 (M21-1)
+_NATIVE = _RESP | {"top_k", "min_p", "repetition_penalty"}
 _OR = {"reasoning", "max_tokens", "temperature", "provider", *NEW}
 _COMPAT = {"max_tokens", "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed",
            "stop"}
@@ -33,9 +33,11 @@ WIRE = {
     "chat": {**{n: n for n in VALID}, "provider": "provider"},
     "native": {"max_tokens": "max_output_tokens", "temperature": "temperature", "top_p": "top_p", "top_k": "top_k",
                "min_p": "min_p", "repetition_penalty": "repeat_penalty"},
-    "responses": {"max_tokens": "max_output_tokens", "temperature": "temperature"},
+    "responses": {"max_tokens": "max_output_tokens", "temperature": "temperature", "top_p": "top_p"},
 }
 ROUTE_WORDS = {"chat": "route", "native": "native route", "responses": "Responses route"}
+# Settings the LM Studio native route sends, listed independently of the implementation (M21-5).
+NATIVE_SENDS = {"top_k", "min_p", "repetition_penalty"}
 
 
 def _complete_error(server, kind, reasoning, kw):
@@ -110,8 +112,11 @@ def test_r10_unsupported_settings_are_refused(server, kind, reasoning, kw, expec
     (name,) = kw
     route = route_of(kind, reasoning)
     assert name in str(exc) and ROUTE_WORDS[route] in str(exc)
-    if route == "responses":
-        assert 'reasoning="off"' in str(exc)
+    if route == "responses":  # M21-5
+        assert ('reasoning="off"' in str(exc)) == (name in NATIVE_SENDS)
+        assert "(effect unverified)" in str(exc)
+    else:
+        assert "effect unverified" not in str(exc)
 
 
 @pytest.mark.parametrize("kind,reasoning,kw,expected", list(_r11_cases()))

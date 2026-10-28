@@ -1,0 +1,27 @@
+modelSpell 0.2.1 — changed files (from devel 0cf51a3), per 0.2.1 tech spec v6 and probe v6.
+Unzip at the repository root. Nothing has been committed or pushed.
+
+Modified
+  modelspell/_routes/responses.py   top_p added to the Responses FIELDS (M21-1, M21-2)
+  modelspell/_complete.py           Responses refusal messages (M21-5)
+  tests/golden/requests.json        G13
+  tests/test_settings.py            _RESP, WIRE, R10 message assertions
+  README.md  NEWS.md  DEVEL.md
+  tests/fixtures/README.md          V2 status first, 0.2.1 run pending, history, probe notes
+  docs/modelspell_design_history.md Round 6
+
+Added
+  docs/modelspell_v1_spec_v7.md     authoritative spec (v6 stays in docs/ as history, unchanged)
+  tests/probe_lmstudio.py           diagnostic, not a test; not collected by pytest
+  tests/test_probe_lmstudio.py      offline, deterministic
+
+Delete: none in the repository.
+Do NOT add (withdrawn in spec v6): tests/effects.py, tests/test_effects.py, the E1 block for
+tests/test_live.py (from the v4/v5 probe zips), and the old uncommitted lms_responses_probe.py.
+
+Before release (spec v6 Section 10)
+  1. python -m pytest                     (offline; 541 passed, 14 skipped here)
+  2. python -m pytest -m live -s -k v2_lmstudio_responses
+     -> paste V2 lines into tests/fixtures/README.md; top_p via "argument" must be "accepted"
+  3. update README "Verification status" (says pending) with that run's date
+  4. bump modelspell/_version.py to 0.2.1, commit to devel, python scripts/build_release.py --smoke

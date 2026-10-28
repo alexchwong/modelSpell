@@ -1,4 +1,8 @@
 # NEWS
+## 0.2.1
+- `top_p` is now sent on LM Studio's Responses route (reasoning default, low, medium, high), as OpenAI's Responses reference defines.
+- Refusals on that route suggest `reasoning="off"` only where it helps, and mark `extra` as effect-unverified.
+
 ## 0.2.0
 - `complete()` adds `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed` and `stop`.
 - Each setting is sent under the route's field name; LM Studio native sends `repeat_penalty`.

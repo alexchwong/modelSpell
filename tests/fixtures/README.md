@@ -56,15 +56,9 @@ Check every captured file for the key before committing it. Add a row below with
 
 **Not run** — no `OPENROUTER_API_KEY` available at implementation time. Run `pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip` and record the printed entries, chosen slug, and outcome here.
 
-## Verification V2 (spec v6 §17)
+## Verification V2 (spec v7 §17)
 
-**Attempted, not verified (27 Oct 2026).** An OpenRouter run with `qwen/qwen3.8-27b` pinned to
-`darkbloom/fp4` returned HTTP 404 for all 22 requests. Account guardrails (zero data retention)
-removed every provider. All records are `unrelated`, and the run verifies nothing. OpenRouter
-therefore stays **not verified**. The skipped rows below retain the original implementation
-environment's status; this unsuccessful attempt does not replace them with verification.
-
-**Not run** (27 Oct 2026, package 0.2.0) — no LM Studio instance, no `OPENROUTER_API_KEY` and no llama-server were available in the implementation environment. Every backend is therefore **skipped**, every row of the support and range tables (spec v6 §6.7, §6.8.2) ships as documented, and the README marks them unverified. Nothing here may be described as verification until the checks below are run.
+V2 records whether a backend **accepts** each setting, never whether it applies it (spec v7 §17, M21-3).
 
 Run with `python -m pytest -m live -s -k v2` (variables in `DEVEL.md`). Paste each printed `V2 {...}` line, then classify every `refused` record as a route limitation, a model or provider limitation, or an unrelated failure, and record what (if anything) changed.
 
@@ -73,6 +67,7 @@ Run with `python -m pytest -m live -s -k v2` (variables in `DEVEL.md`). Paste ea
 | OpenRouter | n/a (hosted) | chat_completions | qwen/qwen3-coder-next, pinned `parasail/bf16` (first listed), no fallbacks, no `require_parameters` | **run 27 Oct 2026** |
 | LM Studio | 0.4.21 (Build 2) | lmstudio_native | qwen3.8-27b | **run 28 Oct 2026** |
 | LM Studio | 0.4.21 (Build 2) | responses | qwen3.8-27b | **run 28 Oct 2026** |
+| LM Studio | *to record* | responses (0.2.1 working copy) | *to record* | **pending**: required before releasing 0.2.1 |
 | llama-server (`openai_compat`) | b9910-f5525f7e7 | chat_completions | qwen3-coder-next | **run 28 Oct 2026** |
 
 OpenRouter, 27 Oct 2026: all 10 supported settings `accepted` (served by Parasail), effect unverified.
@@ -91,7 +86,8 @@ refusal of an out-of-range value. No table change.
 LM Studio Responses (reasoning "low"), 28 Oct 2026: `max_tokens` and `temperature` `accepted`.
 The 8 settings modelSpell does not send on this route were all `accepted` when forced through
 `extra`; whether LM Studio applies or silently drops them is not established. No table change
-(spec v6 §6.8.2: acceptance alone is not evidence).
+(spec v6 §6.8.2: acceptance alone is not evidence). Package 0.2.1 adds `top_p` to this route on
+documentation (spec v7 §7.2, M21-2), not on this acceptance; see the 0.2.1 run below.
 
 llama-server, 28 Oct 2026: all 9 supported settings `accepted`, effect unverified. Probes through
 `extra`: `repetition_penalty` and `repeat_penalty` both `accepted`. Source check at f5525f7
@@ -100,3 +96,39 @@ alias of `n_predict`); `repeat_penalty` is a field with no aliases; fields outsi
 ignored without error. So `repetition_penalty` is accepted and silently ignored. Classification: no
 route limitation; M2-3's exclusion of `repetition_penalty` on `openai_compat` confirmed. No table
 change. This verifies llama-server only, not other `openai_compat` servers.
+
+### 0.2.1: `top_p` on LM Studio Responses (pending)
+
+Before releasing 0.2.1, run `python -m pytest -m live -s -k v2_lmstudio_responses` from the 0.2.1
+working copy and paste the `V2` lines here with the date and LM Studio version. The release needs
+the record `setting: "top_p", via: "argument"` to be `accepted`. An `unrelated` record means re-run.
+A 4xx naming `top_p` is classified under spec v7 §17 before anything else is decided.
+
+### History
+
+**Attempted, not verified (27 Oct 2026).** An OpenRouter run with `qwen/qwen3.8-27b` pinned to
+`darkbloom/fp4` returned HTTP 404 for all 22 requests. Account guardrails (zero data retention)
+removed every provider. All records are `unrelated`, and the run verifies nothing. OpenRouter
+therefore stays **not verified**. The skipped rows below retain the original implementation
+environment's status; this unsuccessful attempt does not replace them with verification.
+
+**Not run** (27 Oct 2026, package 0.2.0) — no LM Studio instance, no `OPENROUTER_API_KEY` and no llama-server were available in the implementation environment. Every backend is therefore **skipped**, every row of the support and range tables (spec v6 §6.7, §6.8.2) ships as documented, and the README marks them unverified. Nothing here may be described as verification until the checks below are run.
+
+## Probe observations (informal)
+
+Observations of model output are information only. Model output is not reproducible, so nothing in
+the support tables, a release or the README is decided from them (spec v7 §17, M21-3).
+
+**28 Oct 2026**, uncommitted script, LM Studio Responses route, reasoning "low", `qwen3.8-27b`,
+non-streaming, token cap 1500. The LM Studio version, engine, quantisation and presets were not
+recorded. Fields under test went through `extra`.
+
+- A made-up field (`zz_not_a_field`) was accepted.
+- `top_p=0.01`: three identical answers; the baseline gave three different answers.
+- `top_k=1`, `min_p=0.99` and `seed=42`: three different answers each.
+- `stop=["17"]`: counting continued to 30.
+- The penalty probes had a blank baseline at temperature 0, so nothing could be compared.
+
+Full answers are in Appendix A of the *modelSpell 0.2.1 technical specification* (v6). Later output
+of `tests/probe_lmstudio.py` may be kept under `tests/fixtures/evidence/` with the date, LM Studio
+version, engine and model; it is informal and nothing cites it.

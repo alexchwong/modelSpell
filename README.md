@@ -55,9 +55,10 @@ The *generation settings* are `reasoning`, `max_tokens`, `temperature`, `provide
 
 | Argument | OpenRouter | LM Studio native (`reasoning="off"`) | LM Studio Responses (other reasoning) | `openai_compat` |
 |---|---|---|---|---|
+| `reasoning` | `{"effort": …}` (`off` → `none`) | `"off"` | `{"effort": …}` | — |
 | `temperature` | `temperature` (≤ 2) | `temperature` (≤ 1) | `temperature` | `temperature` |
 | `max_tokens` | `max_tokens` | `max_output_tokens` | `max_output_tokens` | `max_tokens` |
-| `top_p` | `top_p` | `top_p` | — | `top_p` |
+| `top_p` | `top_p` | `top_p` | `top_p` (0.2.1) | `top_p` |
 | `top_k` | `top_k` | `top_k` | — | `top_k` (extension) |
 | `min_p` | `min_p` | `min_p` | — | `min_p` (extension) |
 | `repetition_penalty` | `repetition_penalty` (≤ 2) | `repeat_penalty` | — | — |
@@ -65,14 +66,19 @@ The *generation settings* are `reasoning`, `max_tokens`, `temperature`, `provide
 | `frequency_penalty` | `frequency_penalty` (−2 to 2) | — | — | `frequency_penalty` |
 | `seed` | `seed` | — | — | `seed` |
 | `stop` | `stop` (array) | — | — | `stop` (array) |
+| `provider` | `provider` (verbatim) | — | — | — |
+
+The table shows what modelSpell **sends**, not what a server applies.
 
 Ranges in brackets are the backend's documented limits for that route and are checked before sending. Every route also checks each setting's meaning: `top_p` and `min_p` in [0, 1]; `top_k` an `int` ≥ 0; `temperature` and `repetition_penalty` ≥ 0; `seed` any `int` (no range: llama-server uses −1 for random); `stop` a non-empty list or tuple of non-empty strings (a bare string is refused); every number finite (no `inf`/`nan`), and `bool` is never a number.
 
-**Verification status.** The table comes from each backend's documentation (checked 27 October 2026). The live compatibility check V2 (`tests/fixtures/README.md`) has **not yet been run** against any backend, so every row is currently **unverified** against a real server. No model- or provider-specific restrictions have been recorded yet.
+**Verification status.** The table comes from each backend's documentation (checked 27–28 October 2026). The live compatibility check V2 checks only that a backend **accepts** each setting. It was run on 27–28 October 2026 against OpenRouter, LM Studio (both routes) and llama-server, and accepted every supported setting. For 0.2.1's `top_p` on the LM Studio Responses route it is **pending** a run from the 0.2.1 working copy. No route's settings are verified to be *applied*, and modelSpell never claims they are. No model- or provider-specific restrictions have been recorded. Details and history: `tests/fixtures/README.md`.
 
 **Unsupported means refused, not dropped.** A non-`None` setting that the route does not send raises `UnsupportedSetting` before any network I/O, naming the setting and the route. modelSpell never accepts a setting and silently leaves it out.
 
-**LM Studio with reasoning enabled has no advanced sampling.** The Responses route (reasoning `None`, `low`, `medium`, `high`) takes `temperature` and `max_tokens` but none of the eight sampling arguments, because LM Studio's Responses documentation does not list which sampling fields it honours. This is modelSpell's contract, not a statement about what LM Studio can do. For advanced sampling on LM Studio use `reasoning="off"` (the native route), or send fields through `extra` at your own risk.
+**LM Studio sampling by route.** On the Responses route (reasoning `None`, `low`, `medium` or `high`), modelSpell sends `temperature`, `max_tokens` and, from 0.2.1, `top_p`. These are the generation settings OpenAI's Responses reference defines, and LM Studio's Responses page refers to that reference for the fields it does not list. Setting `reasoning="off"` (the native route) additionally exposes `top_k`, `min_p` and `repetition_penalty`. Neither LM Studio route sends `seed`, `stop`, `presence_penalty` or `frequency_penalty`.
+
+**The other seven fields on the Responses route** are refused as named arguments. LM Studio accepts them through `extra`, but it also accepts a made-up field, so acceptance shows nothing. OpenAI's Responses reference does not define them. If you send them through `extra`, do not assume they are applied.
 
 **`openai_compat`.** `top_p`, `presence_penalty`, `frequency_penalty`, `seed` and `stop` are part of the standard Chat Completions shape. `top_k` and `min_p` are **extensions** (llama-server and vLLM use these names); a server that does not know them may refuse or ignore them. `repetition_penalty` is **not sent** on `openai_compat`, because servers disagree on its name (llama-server `repeat_penalty`, vLLM `repetition_penalty`); pass the right name through `extra` if you know your server.
 
@@ -80,6 +86,7 @@ Ranges in brackets are the backend's documented limits for that route and are ch
 - On OpenRouter, a provider that does not support a parameter ignores it by default, with no error, even with a pinned provider and `allow_fallbacks: false`. Adding `"require_parameters": True` to `provider=` makes OpenRouter route only to providers that *declare* support for every parameter in the request. That establishes declared support, not proof that every sampler changes every model's output. modelSpell passes `provider` verbatim and never adds this flag itself.
 - On `openai_compat`, a server that does not know a field may refuse or ignore it.
 - On LM Studio's native route, behaviour for a model that cannot use a setting is undocumented.
+- On LM Studio's Responses route, LM Studio accepts fields without error whether or not it uses them, so neither acceptance nor modelSpell's support says a setting is applied.
 
 Nothing modelSpell returns claims a setting was applied.
 
@@ -120,7 +127,7 @@ CLOUD = Endpoint(kind="openrouter", api_key=key_from_ui)   # held in memory only
 
 TASKS = {
     "extract": dict(endpoint=LOCAL, model="<lmstudio-model-key>", reasoning="off", max_tokens=4096,
-                    top_k=20),                                  # advanced sampling needs reasoning="off" on LM Studio
+                    top_k=20),                                  # top_k needs reasoning="off" on LM Studio
     "review":  dict(endpoint=CLOUD, model="<author>/<model>", reasoning="high", max_tokens=16384,
                     provider={"order": ["<provider-slug>"], "allow_fallbacks": False}),
 }
