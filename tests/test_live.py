@@ -33,13 +33,22 @@ def _streamed(endpoint, model, **kw):
     return r
 
 
+@pytest.fixture(scope="module")
+def lms_info():
+    models = list_models(Endpoint(kind="lmstudio", base_url=LMS_URL))
+    info = next((m for m in models if m.id == LMS_MODEL), None)
+    assert info is not None, f"{LMS_MODEL!r} not returned by list_models; ids: {[m.id for m in models]}"
+    return info
+
+
 @need_lms
 @pytest.mark.parametrize("reasoning", [None, "high", "off"])
 @pytest.mark.parametrize("stream", [False, True])
-def test_live_lmstudio(reasoning, stream):
+def test_live_lmstudio(reasoning, stream, lms_info):
     e = Endpoint(kind="lmstudio", base_url=LMS_URL)
     kw = dict(reasoning=reasoning, max_tokens=1024, timeout=600)
-    r = _streamed(e, LMS_MODEL, **kw) if stream else complete(e, LMS_MODEL, PROMPT, **kw)
+    model = lms_info if reasoning == "off" else LMS_MODEL
+    r = _streamed(e, model, **kw) if stream else complete(e, model, PROMPT, **kw)
     assert r.transport == ("lmstudio_native" if reasoning == "off" else "responses")
     assert r.text or r.truncated
     if reasoning == "off":
@@ -99,11 +108,13 @@ CHAT_WIRE = {n: n for n in V2_VALUES}  # wire names used when probing a route th
 
 
 def _v2_attempt(endpoint, model, *, meta, setting, value, via="argument", **kw):
-    rec = dict(backend=meta["backend"], version=meta.get("version"), route=meta["route"], model=model,
+    rec = dict(backend=meta["backend"], version=meta.get("version"), route=meta["route"], model=getattr(model, "id", model),
                provider=meta.get("provider"), setting=setting,
                value=value, via=via)
     if "pin_source" in meta:
         rec["pin_source"] = meta["pin_source"]
+    if "model_reasoning_options" in meta:
+        rec["model_reasoning_options"] = meta["model_reasoning_options"]
     try:
         r = complete(endpoint, model, V2_PROMPT, on_text=lambda s: None, timeout=300, **kw)
         rec.update(outcome="accepted", effect="effect_unverified", status=200, served_by=r.provider)
@@ -180,11 +191,12 @@ def test_live_v2_openrouter():
 
 
 @need_lms
-def test_live_v2_lmstudio_native():
+def test_live_v2_lmstudio_native(lms_info):
     e = Endpoint(kind="lmstudio", base_url=LMS_URL)
-    meta = dict(backend="lmstudio", route="lmstudio_native")
-    records = _v2_supported(e, LMS_MODEL, "lmstudio", "off", **meta)
-    _v2_extra(e, LMS_MODEL, [("temperature", 1), ("temperature", 1.01)], reasoning="off", **meta)
+    meta = dict(backend="lmstudio", route="lmstudio_native",
+                model_reasoning_options=list(lms_info.reasoning_options) if lms_info.reasoning_options else None)
+    records = _v2_supported(e, lms_info, "lmstudio", "off", **meta)
+    _v2_extra(e, lms_info, [("temperature", 1), ("temperature", 1.01)], reasoning="off", **meta)
     _v2_require_acceptance(records)
     _v2_fail_on_refusals(records)
 

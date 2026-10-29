@@ -28,7 +28,9 @@ LABEL = 'the LM Studio native route (reasoning="off")'
 
 def build_body(messages, model, *, reasoning, provider, settings, streaming, kind) -> dict:
     system_prompt, user_input = flatten(messages)
-    body = {"model": model, "input": user_input, "reasoning": "off", "store": False, "stream": streaming}
+    body = {"model": model, "input": user_input, "store": False, "stream": streaming}
+    if reasoning is not None:
+        body["reasoning"] = reasoning   # "off": this route is selected only by reasoning="off" (§6.3)
     for arg, wire in FIELDS.items():
         if settings.get(arg) is not None:
             body[wire] = settings[arg]

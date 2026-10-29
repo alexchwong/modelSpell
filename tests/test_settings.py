@@ -11,7 +11,7 @@ import pytest
 
 from conftest import MSGS, canned, ep, route_of
 from modelspell import (AuthError, ConfigError, Endpoint, UnsupportedSetting, check_settings, complete,
-                        supported_settings)
+                        ModelInfo, supported_settings)
 
 NEW = ("top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty", "seed", "stop")
 NUMERIC = ("temperature", "top_p", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty")
@@ -274,3 +274,14 @@ def test_value_check_precedes_support(server):
     assert type(exc) is ConfigError
     exc = _complete_error(server, "lmstudio", "low", {"top_k": 1})
     assert type(exc) is UnsupportedSetting
+
+
+def test_model_info_unsupported_setting_matches_id(server):
+    info = ModelInfo(id="m", name=None, context_length=None, loaded=None, supports_tools=None,
+                     supports_reasoning=None, reasoning_options=None, pricing=None, raw={})
+    messages = []
+    for model in ("m", info):
+        with pytest.raises(UnsupportedSetting) as exc:
+            complete(ep(server, "lmstudio"), model, MSGS, reasoning="low", top_k=1)
+        messages.append(str(exc.value))
+    assert messages[0] == messages[1] and server.requests == []

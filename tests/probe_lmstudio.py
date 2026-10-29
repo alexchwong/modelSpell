@@ -7,6 +7,8 @@ so no release, support table or document is decided by it (M21-3).
 
 A setting modelSpell sends on the selected route goes through its named argument; any other setting goes
 through extra, once per candidate wire name.
+The probe discovers once and passes the model's discovery entry, so --reasoning off also works on
+models without reasoning configuration.
 
     export MODELSPELL_LIVE_LMSTUDIO_URL=http://localhost:1234/v1
     export MODELSPELL_LIVE_LMSTUDIO_MODEL=<model key>
@@ -32,7 +34,7 @@ from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))  # this checkout's modelspell
 import modelspell  # noqa: E402
-from modelspell import Endpoint, ModelSpellError, complete, list_models, supported_settings  # noqa: E402
+from modelspell import Endpoint, ModelInfo, ModelSpellError, complete, list_models, supported_settings  # noqa: E402
 
 KIND = "lmstudio"
 REASONING = {"default": None, "off": "off", "low": "low", "medium": "medium", "high": "high"}
@@ -141,6 +143,7 @@ def model_config(models: list, requested: str) -> dict:
 class Ctx:
     endpoint: Endpoint
     model: str
+    model_arg: str | ModelInfo
     reasoning: str | None
     transport: str
     runs: int
@@ -184,7 +187,7 @@ def ask(ctx: Ctx, probe: Probe, arm: str, value: object, via: str | None, kw: di
                max_tokens=ctx.max_tokens, prompt=probe.prompt, requested_model=ctx.model)
     ctx.seq += 1
     try:
-        result = complete(ctx.endpoint, ctx.model, PROMPTS[probe.prompt], **kwargs)
+        result = complete(ctx.endpoint, ctx.model_arg, PROMPTS[probe.prompt], **kwargs)
     except ModelSpellError as exc:
         rec.update(error_fields(exc))
     else:
@@ -198,20 +201,23 @@ def ask(ctx: Ctx, probe: Probe, arm: str, value: object, via: str | None, kw: di
 
 def describe(probe: Probe, records: list[dict]) -> str:
     """What came back, in words. Counts only; no verdict."""
-    if probe.kind == "control":
-        r = records[0]
-        return "accepted" if r["outcome"] != "error" else f"refused or failed: {r.get('error')} (status {r.get('status')})"
     by: dict[str, list[dict]] = {}
     for r in records:
         by.setdefault(r["arm"], []).append(r)
-    not_ok = sum(r["outcome"] != "ok" for r in records)
-    note = f"; {not_ok} of {len(records)} records not ok (see outcome)" if not_ok else ""
-    base, treat = by.get("baseline", []), by.get("treatment", [])
+    ok = {arm: [r for r in rs if r["outcome"] == "ok"] for arm, rs in by.items()}
+    if any(not rs for rs in ok.values()):
+        first_error = next((r.get("detail") or r.get("error") for r in records if r.get("error")),
+                           next((r["outcome"] for r in records if r["outcome"] != "ok"), "unknown outcome"))
+        return f"no usable answers: {str(first_error)[:120]}"
+    note = "; " + "; ".join(f"{arm} {len(ok[arm])} ok of {len(rs)}" for arm, rs in by.items())
+    if probe.kind == "control":
+        return "accepted" + note
+    base, treat = ok.get("baseline", []), ok.get("treatment", [])
     texts = lambda rs: [r.get("text") or "" for r in rs]  # noqa: E731
     if probe.kind == "varied":
         line = (f"baseline {len(set(texts(base)))} distinct of {len(base)}; "
                 f"treatment {len(set(texts(treat)))} distinct of {len(treat)}")
-        alt = by.get("alternate")
+        alt = ok.get("alternate")
         if alt:
             line += f"; seed {ALT_SEED} {'repeats' if texts(alt)[0] in texts(treat) else 'differs from'} a seed {probe.value} answer"
         return line + note
@@ -223,14 +229,12 @@ def describe(probe: Probe, records: list[dict]) -> str:
     return line + note
 
 
-def _config(ctx: Ctx, url: str, probes: list[str]) -> dict:
-    try:
-        model = model_config(list(list_models(ctx.endpoint)), ctx.model)
-    except ModelSpellError as exc:
-        model = error_fields(exc)
+def _config(ctx: Ctx, url: str, probes: list[str], models: list, discovery_error: dict | None = None) -> dict:
+    model = discovery_error if discovery_error is not None else model_config(models, ctx.model)
     return dict(check="P", session=ctx.session,
                 started=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                 url=url, requested_model=ctx.model, reasoning=ctx.reasoning, transport=ctx.transport,
+                model_arg="ModelInfo" if isinstance(ctx.model_arg, ModelInfo) else "id",
                 runs=ctx.runs, max_tokens=ctx.max_tokens, probes=probes, prompts=PROMPTS,
                 modelspell=modelspell.__version__, modelspell_path=str(pathlib.Path(modelspell.__file__).parent),
                 python=platform.python_version(), client_platform=platform.platform(), model=model,
@@ -278,11 +282,18 @@ def _args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     a = _args(argv)
     reasoning = REASONING[a.reasoning]
-    ctx = Ctx(endpoint=Endpoint(kind=KIND, base_url=a.url), model=a.model, reasoning=reasoning,
+    ctx = Ctx(endpoint=Endpoint(kind=KIND, base_url=a.url), model=a.model, model_arg=a.model, reasoning=reasoning,
               transport="lmstudio_native" if reasoning == "off" else "responses", runs=a.runs,
               max_tokens=a.max_tokens, timeout=a.timeout,
               session=a.session or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-    print("P-CONFIG " + json.dumps(_config(ctx, a.url, a.probes)), flush=True)
+    discovery_error = None
+    try:
+        models = list_models(ctx.endpoint)
+    except ModelSpellError as exc:
+        models = []
+        discovery_error = error_fields(exc)
+    ctx.model_arg = next((m for m in models if m.id == a.model), a.model)
+    print("P-CONFIG " + json.dumps(_config(ctx, a.url, a.probes, models, discovery_error)), flush=True)
     summary = []
     try:
         for name in a.probes:

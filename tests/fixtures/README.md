@@ -97,12 +97,19 @@ ignored without error. So `repetition_penalty` is accepted and silently ignored.
 route limitation; M2-3's exclusion of `repetition_penalty` on `openai_compat` confirmed. No table
 change. This verifies llama-server only, not other `openai_compat` servers.
 
-### 0.2.1: `top_p` on LM Studio Responses (pending)
+### 0.2.1 live checks (pending)
 
-Before releasing 0.2.1, run `python -m pytest -m live -s -k v2_lmstudio_responses` from the 0.2.1
-working copy and paste the `V2` lines here with the date and LM Studio version. The release needs
+Before releasing 0.2.1, the owner will run `python -m pytest -m live -s -k lmstudio` from the 0.2.1
+working copy once for `qwen3-coder-next` and once for `qwen3.8-27b`, and paste both runs here with
+the date and LM Studio version. Native V2 records include `model_reasoning_options`. The release needs
 the record `setting: "top_p", via: "argument"` to be `accepted`. An `unrelated` record means re-run.
 A 4xx naming `top_p` is classified under spec v7 §17 before anything else is decided.
+
+**Model limitation, 29 Oct 2026.** Before this change, LM Studio refused every native-route request
+for `qwen3-coder-next` (HTTP 400, `param: reasoning`, "does not expose reasoning configuration"),
+while `qwen3.8-27b` passed. Resolved in 0.2.1 by M21-8 for callers that pass the model's `ModelInfo`.
+The two release-check runs above remain pending; this historical report is not verification of
+the updated implementation.
 
 ### History
 

@@ -9,9 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 import probe_lmstudio as probe
-from modelspell import BackendError, supported_settings
+from modelspell import BackendError, ModelInfo, supported_settings
 
-MODELS = [SimpleNamespace(id="m", raw={"key": "m", "format": "gguf", "loaded_instances": [{"id": "m"}]})]
+MODELS = [ModelInfo(id="m", name=None, context_length=None, loaded=None, supports_tools=None,
+                    supports_reasoning=None, reasoning_options=None, pricing=None,
+                    raw={"key": "m", "format": "gguf", "loaded_instances": [{"id": "m"}]})]
 
 
 class Recorder:
@@ -22,12 +24,12 @@ class Recorder:
         self.transport_override = transport_override
 
     def __call__(self, endpoint, model, prompt, *, reasoning=None, extra=None, **named):
-        self.calls.append(dict(prompt=prompt, reasoning=reasoning, extra=extra, **named))
+        self.calls.append(dict(model=model, prompt=prompt, reasoning=reasoning, extra=extra, **named))
         transport = self.transport_override or ("lmstudio_native" if reasoning == "off" else "responses")
         return SimpleNamespace(text=f"answer {len(self.calls)}", reasoning=None,
                                usage=SimpleNamespace(output_tokens=5, reasoning_tokens=0),
                                finish_reason=None if transport == "lmstudio_native" else "stop",
-                               truncated=False, model=model, transport=transport)
+                               truncated=False, model=getattr(model, "id", model), transport=transport)
 
 
 def run(monkeypatch, capsys, fake, *args):
@@ -54,7 +56,7 @@ def test_request_shapes(monkeypatch, capsys, reasoning):
     assert code == 0 and len(fake.calls) == expected_requests(level)
     for call in fake.calls:
         assert call["reasoning"] == level and call["max_tokens"] == 1500 and call["timeout"] == 600.0
-        named = {k for k in call if k not in ("prompt", "reasoning", "extra", "max_tokens", "timeout", "temperature")}
+        named = {k for k in call if k not in ("model", "prompt", "reasoning", "extra", "max_tokens", "timeout", "temperature")}
         assert named <= supported                                     # never a refused named argument
         assert call["extra"] is None or len(call["extra"]) == 1
     sent_extra = {next(iter(c["extra"])) for c in fake.calls if c["extra"]}
@@ -90,6 +92,66 @@ def test_errors_are_recorded_and_the_run_continues(monkeypatch, capsys):
     records = [json.loads(l[2:]) for l in out if l.startswith("P ")]
     assert code == 0 and len(records) == 7
     assert all(r["outcome"] == "error" and r["status"] == 400 for r in records)
+
+
+def test_discovered_model_is_passed_once(monkeypatch, capsys):
+    fake = Recorder()
+    discoveries = []
+    monkeypatch.setattr(probe, "complete", fake)
+
+    def list_models(endpoint):
+        discoveries.append(endpoint)
+        return MODELS
+
+    monkeypatch.setattr(probe, "list_models", list_models)
+    assert probe.main(["--url", "http://127.0.0.1:9/v1", "--model", "m", "--reasoning", "off"]) == 0
+    assert len(discoveries) == 1 and fake.calls
+    assert all(call["model"] is MODELS[0] for call in fake.calls)
+    config = json.loads(capsys.readouterr().out.splitlines()[0][9:])
+    assert config["model_arg"] == "ModelInfo"
+
+
+def test_unmatched_model_falls_back_to_id(monkeypatch, capsys):
+    fake = Recorder()
+    monkeypatch.setattr(probe, "complete", fake)
+    monkeypatch.setattr(probe, "list_models", lambda endpoint: [SimpleNamespace(id="other", raw={})])
+    assert probe.main(["--url", "http://127.0.0.1:9/v1", "--model", "m"]) == 0
+    assert fake.calls and all(call["model"] == "m" for call in fake.calls)
+    config = json.loads(capsys.readouterr().out.splitlines()[0][9:])
+    assert config["model_arg"] == "id"
+
+
+def test_failed_answers_are_not_counted_as_distinct(monkeypatch, capsys):
+    def refuse(*args, **kw):
+        raise BackendError("no reasoning configuration", status=400)
+
+    code, out = run(monkeypatch, capsys, refuse)
+    summary = "\n".join(out[out.index(next(line for line in out if line.startswith("SUMMARY"))):])
+    assert code == 0 and "no usable answers" in summary and "distinct" not in summary
+
+
+def test_describe_uses_only_ok_answers():
+    records = [dict(arm="baseline", outcome="ok", text="answer"),
+               dict(arm="baseline", outcome="error", error="BackendError", text=""),
+               dict(arm="treatment", outcome="ok", text="answer")]
+    summary = probe.describe(probe.BY_NAME["top_k"], records)
+    assert "baseline 1 distinct of 1" in summary and "baseline 1 ok of 2" in summary
+    records.append(dict(arm="alternate", outcome="error", error="BackendError", detail="failed"))
+    assert probe.describe(probe.BY_NAME["seed"], records) == "no usable answers: BackendError"
+
+
+def test_discovery_failure_falls_back_to_id(monkeypatch, capsys):
+    fake = Recorder()
+    monkeypatch.setattr(probe, "complete", fake)
+
+    def list_models(endpoint):
+        raise BackendError("discovery failed", status=500)
+
+    monkeypatch.setattr(probe, "list_models", list_models)
+    assert probe.main(["--url", "http://127.0.0.1:9/v1", "--model", "m", "--probes", "control"]) == 0
+    assert fake.calls[0]["model"] == "m"
+    config = json.loads(capsys.readouterr().out.splitlines()[0][9:])
+    assert config["model_arg"] == "id" and config["model"]["status"] == 500
 
 
 def test_routing_regression_stops_the_run(monkeypatch, capsys):

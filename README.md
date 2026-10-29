@@ -30,7 +30,7 @@ from modelspell import (
 ```
 
 - `Endpoint(kind, base_url=None, api_key=None, api_key_env=None, headers=None)` — `kind` is `"lmstudio"`, `"openrouter"` or `"openai_compat"`. `base_url` is the OpenAI-compatible root **including `/v1`** (defaults: `http://localhost:1234/v1`, `https://openrouter.ai/api/v1`; required for `openai_compat`). OpenRouter's `api_key_env` defaults to `OPENROUTER_API_KEY`.
-- `complete(endpoint, model, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
 - `supported_settings(kind, reasoning=None) -> frozenset[str]` and `check_settings(kind, *, reasoning=None, max_tokens=None, …, provider=None) -> None` — pure helpers for the generation settings; see below.
 - `list_models(endpoint, *, timeout=15.0) -> list[ModelInfo]` (all kinds) and `list_providers(endpoint, "author/slug", *, timeout=15.0) -> list[ProviderInfo]` (OpenRouter only). No caching.
 
@@ -77,6 +77,15 @@ Ranges in brackets are the backend's documented limits for that route and are ch
 **Unsupported means refused, not dropped.** A non-`None` setting that the route does not send raises `UnsupportedSetting` before any network I/O, naming the setting and the route. modelSpell never accepts a setting and silently leaves it out.
 
 **LM Studio sampling by route.** On the Responses route (reasoning `None`, `low`, `medium` or `high`), modelSpell sends `temperature`, `max_tokens` and, from 0.2.1, `top_p`. These are the generation settings OpenAI's Responses reference defines, and LM Studio's Responses page refers to that reference for the fields it does not list. Setting `reasoning="off"` (the native route) additionally exposes `top_k`, `min_p` and `repetition_penalty`. Neither LM Studio route sends `seed`, `stop`, `presence_penalty` or `frequency_penalty`.
+
+From 0.2.1, pass a `ModelInfo` already returned by `list_models()` for the same endpoint. If it has no reasoning options, the native request omits `reasoning`: there is nothing to turn off. modelSpell sends its `id` and never discovers or caches capabilities inside `complete()`.
+
+```python
+info = next(m for m in list_models(endpoint) if m.id == "qwen3-coder-next")
+complete(endpoint, info, prompt, reasoning="off", top_k=20)   # no reasoning field is sent for this model
+```
+
+With a string model, `reasoning="off"` still sends the field, and LM Studio refuses it for a model that exposes no reasoning configuration. Non-empty options, even `("on",)`, still send `"reasoning": "off"`; the server decides whether to accept it. Passing a discovery entry from another endpoint is the caller's error and is not detected.
 
 **The other seven fields on the Responses route** are refused as named arguments. LM Studio accepts them through `extra`, but it also accepts a made-up field, so acceptance shows nothing. OpenAI's Responses reference does not define them. If you send them through `extra`, do not assume they are applied.
 

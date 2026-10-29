@@ -6,9 +6,19 @@ import pytest
 
 from conftest import KEY, Reply, canned, ep, fx
 from modelspell import (AuthError, BackendError, ConfigError, ConnectError, Endpoint, RequestTimeout, complete,
-                        list_models)
+                        ModelInfo, list_models)
 
 NOOP = lambda s: None  # noqa: E731
+
+
+def test_model_info_backend_error_names_id(server):
+    info = ModelInfo(id="m", name=None, context_length=None, loaded=None, supports_tools=None,
+                     supports_reasoning=None, reasoning_options=None, pricing=None, raw={})
+    server.reply(Reply(status=500))
+    with pytest.raises(BackendError) as exc:
+        complete(ep(server, "lmstudio"), info, "x", reasoning="off")
+    assert "'m'" in str(exc.value) and "ModelInfo(" not in str(exc.value)
+    assert len(server.requests) == 1
 
 
 def call(server, kind="openai_compat", reasoning=None, endpoint=None, **kw):

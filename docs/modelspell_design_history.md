@@ -149,3 +149,24 @@ The cause was structural. A test on sampled output is a statistical test, and ma
 - an offline test of disagreement between E1 sessions (version 2), made moot by the withdrawal.
 
 **Evidence.** On 28 October an informal probe was run (`qwen3.8-27b`, reasoning "low"). `top_p=0.01` gave three identical answers where the baseline gave three different ones. No other unsent field showed an effect. That observation prompted the change; it is not its basis (M21-3). It is summarised in `tests/fixtures/README.md`.
+
+**ModelInfo addition (29 October 2026, M21-7–M21-9).** LM Studio refused native requests for
+`qwen3-coder-next` with HTTP 400: "does not expose reasoning configuration" (`param: reasoning`).
+The owner checked with curl that the same request without `reasoning` succeeded:
+`{"model":"qwen3-coder-next","input":"Say ok.","store":false,"top_k":20}` returned a normal answer.
+`list_models()` already exposes the missing configuration as `ModelInfo.reasoning_options=None`.
+The caller may now pass that entry to `complete()`, which sends its id and omits native `reasoning`
+when the options are absent or empty. String models behave as before. The 0.2.1 technical
+specification (v6) said "public API unchanged"; this additive API change, decided by the owner,
+supersedes that statement. Package 0.2.1 is no longer API-identical to 0.2.0; spec v7 is amended
+in place. No library discovery or cache is introduced, and the settings helpers remain unchanged.
+Non-empty options lacking `"off"` are left to the server, keeping settings validation consistent.
+
+Alternatives rejected:
+
+- Discovery inside `complete()`: two requests per call, and contrary to M2-16.
+- Retry on HTTP 400: contrary to the no-retries contract.
+- Always omitting `reasoning`: reasoning models would then reason.
+- A new parameter: `ModelInfo` already carries the information.
+
+**Follow-up:** the developer UI still passes the model id string; changing it is outside this work.

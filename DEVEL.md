@@ -108,6 +108,14 @@ checked on its own:
 | OpenRouter | `OPENROUTER_API_KEY`, `MODELSPELL_LIVE_OPENROUTER_MODEL` (`author/slug`); optional `MODELSPELL_LIVE_OPENROUTER_PROVIDER` (provider slug from `list_providers`; default: first listed provider with a slug) |
 | llama-server (V2 only, as `openai_compat`) | `MODELSPELL_LIVE_LLAMASERVER_URL` (including `/v1`), `MODELSPELL_LIVE_LLAMASERVER_MODEL` |
 
+The LM Studio model may have reasoning configuration or none: native tests pass its `ModelInfo`
+from a module-scoped discovery fixture; Responses tests retain the string id. For the 0.2.1 release,
+run `python -m pytest -m live -s -k lmstudio` once with each kind (for example `qwen3.8-27b` and
+`qwen3-coder-next`). Record both runs in `tests/fixtures/README.md`; native V2 records carry
+`model_reasoning_options`. These checks concern HTTP acceptance and transport, not model output.
+The probe also discovers once, passes the matching entry (or falls back to the id), and reports
+only usable answers in its summaries, including each arm's ok count.
+
 Run verification V1 with
 `python -m pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip`
 and record the printed evidence in `tests/fixtures/README.md`.

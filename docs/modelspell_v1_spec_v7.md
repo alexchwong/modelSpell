@@ -6,6 +6,8 @@
 **Version:** spec v7, superseding `modelspell_v1_spec_v6.md` (kept in `docs/` as history). v7 is package 0.2.1. It folds in the *modelSpell 0.2.1 technical specification* (version 6, 28 October 2026): `top_p` on LM Studio Responses (M21-1) by the referenced Responses documentation (M21-2); no release decision depends on model output (M21-3); refusal message guidance (M21-5); the LM Studio probe diagnostic (M21-6). Its decisions are listed in §19. v6 folded in the *modelSpell 0.2.0 technical specification* (version 3, 27 October 2026): the generation settings — eight new `complete()` arguments, the per-route support and range tables, `supported_settings()` and `check_settings()` (§3, §6.1, §6.7–§6.9, §7), their tests (§12.3, §12.8), verification V2 (§17) and the developer UI's request panel (§18.3). v5 added the naming, version file, license, release and developer-UI requirements; v4 is the original library contract. Review decisions and change maps are in `docs/modelspell_design_history.md`. That document is informative and not part of this contract.
 **Audience:** a coding agent implementing the package from scratch. Every behaviour needed is stated here. Where this document and your intuition disagree, follow this document.
 
+**0.2.1 addition (29 October 2026):** `complete()` accepts a `ModelInfo` as `model` (M21-7); on the LM Studio native route a model with no reasoning configuration gets no `reasoning` field (M21-8). This additive API change means 0.2.1 is no longer API-identical to 0.2.0.
+
 ---
 
 ## 0. How to read this document
@@ -76,6 +78,8 @@ modelSpell is a small Python library with no runtime dependencies. It calls lang
 ## 3. Public API (complete)
 
 Everything below is exported from `modelspell/__init__.py` and listed in `__all__`. Nothing else is public, except the version attribute `modelspell.__version__` (a `str`, §18.1), which is deliberately not in `__all__`.
+
+`complete(endpoint, model: str | ModelInfo, input, *, ...) -> Result` has the full signature in §6.
 
 ```python
 from modelspell import (
@@ -181,7 +185,7 @@ On the wire, messages are serialised as `{"role": ..., "content": ...}` dicts, i
 ```python
 def complete(
     endpoint: Endpoint,
-    model: str,
+    model: str | ModelInfo,
     input: str | Sequence[Message | Mapping[str, str]],
     *,
     reasoning: Literal["off", "low", "medium", "high"] | None = None,
@@ -209,7 +213,7 @@ All arguments after `input` are keyword-only; their order is not significant. **
 
 | Argument | Rule | Error |
 |---|---|---|
-| `model` | non-empty `str` | `ConfigError` |
+| `model` | non-empty `str`, or `ModelInfo` with a non-empty `str` id; sends that id (M21-7) | `ConfigError`: `model must be a non-empty str or a ModelInfo with a non-empty id` |
 | `reasoning` | `None` or one of the four literals | `ConfigError` |
 | `reasoning` on `openai_compat` | must be `None` | `UnsupportedSetting` (the message suggests `extra`) |
 | `max_tokens` | `None` or `int` ≥ 1 (not `bool`) | `ConfigError` |
@@ -294,7 +298,7 @@ In v6 the README example also shows one advanced setting (for example `top_k` on
 
 | Named argument | LM Studio Responses (reasoning `None`, `low`, `medium`, `high`) | LM Studio native (`reasoning="off"`) | OpenRouter (Chat Completions) | `openai_compat` (Chat Completions) |
 |---|---|---|---|---|
-| `reasoning` | `reasoning: {"effort": …}`; `None` omitted | `reasoning: "off"` | `reasoning: {"effort": …}`; `off` sent as `none`; `None` omitted | refused for any non-`None` value |
+| `reasoning` | `reasoning: {"effort": …}`; `None` omitted | `reasoning: "off"`, except M21-8 (§7.3) | `reasoning: {"effort": …}`; `off` sent as `none`; `None` omitted | refused for any non-`None` value |
 | `max_tokens` | `max_output_tokens` | `max_output_tokens` | `max_tokens` | `max_tokens` |
 | `temperature` | `temperature` | `temperature` | `temperature` | `temperature` |
 | `top_p` | `top_p` (added in v7) | `top_p` | `top_p` | `top_p` |
@@ -484,16 +488,25 @@ No live check decides this default. An HTTP 200 would show only that the server 
 
 ### 7.3 LM Studio native chat (`lmstudio`, reasoning `"off"`)
 
-This ports NEL `_payload()`'s `lmstudio-native` branch and `_lmstudio_native_prompt()`, with one deviation: `store: false` by default (#14).
+This ports NEL `_payload()`'s `lmstudio-native` branch and `_lmstudio_native_prompt()`, with `store: false` by default (#14) and the conditional reasoning field (M21-8).
 
 ```python
 system_prompt, user_input = flatten(messages)
-body = {"model": model, "input": user_input, "reasoning": "off", "store": False, "stream": streaming}
+body = {"model": model_id, "input": user_input, "store": False, "stream": streaming}
+if body_reasoning is not None: body["reasoning"] = body_reasoning
 if temperature is not None:  body["temperature"] = temperature
 if max_tokens is not None:   body["max_output_tokens"] = max_tokens
 # v6: top_p -> top_p, top_k -> top_k, min_p -> min_p, repetition_penalty -> repeat_penalty (if not None)
 if system_prompt is not None: body["system_prompt"] = system_prompt
 ```
+
+**M21-8:** route selection still uses the caller's `reasoning="off"`. Set `body_reasoning` to that
+value, except when the caller passed a `ModelInfo` whose `reasoning_options` is `None` or empty:
+then omit the field, because the model has nothing to turn off and LM Studio refuses it. String
+models behave as before. Non-empty options, including `("on",)`, still send `"reasoning": "off"`;
+there is no client-side refusal for a missing `"off"` option. `supported_settings()` and
+`check_settings()` are unchanged (M21-9). The library never discovers or caches capabilities itself;
+it uses only the entry passed by the caller (M2-16). `extra` still merges last (§6.4).
 
 `flatten(messages)` is ported **exactly**:
 
@@ -909,6 +922,9 @@ class ProviderInfo:
 
 `raw` has no default in any of these types; `field(hash=False)` only excludes it from `__hash__`.
 
+A `ModelInfo` returned by `list_models()` for the same endpoint may be passed as
+`complete(model=...)`; passing one from another endpoint is the caller's error and is not detected.
+
 `ProviderInfo` normalises only the fields a provider selector needs. Other endpoint metadata, including `status`, the uptime and latency figures, `max_prompt_tokens` and `service_tier`, is available in `raw` and is not part of the public contract.
 
 `Pricing` values arrive as decimal strings from OpenRouter. Parse them with `float()`; on failure or a negative value, use `None`.
@@ -1079,6 +1095,7 @@ Minimum fixture set per route:
 | R14 | `supported_settings()` equals the §6.9 table for every `kind` × `reasoning`; for each combination every name in the set is accepted by `complete()` and reaches the body, and every generation setting not in it raises `UnsupportedSetting`; an unknown `kind`, an unknown `reasoning`, and `openai_compat` with a reasoning value raise as `complete()` does; no network call, no environment read. |
 | R15 | `stop` given as a `tuple` is sent as a JSON array in the same order. |
 | R16 | `check_settings()` agrees with `complete()`: every refusing case of R10–R13 raises the same exception class and message from both; every accepting case of R10–R14 returns `None`; no network or environment: an OpenRouter case with no key passes `check_settings()` while `complete()` raises `AuthError`. |
+| R17 | `ModelInfo` as model, streaming and non-streaming: (a) native `reasoning="off"` with options `None` or `()` omits only `reasoning`, retaining id and `store: false` (MSGS and G3 parity); (b) options `("off", "on")` or `("on",)` retain `reasoning: "off"`, matching string-model bodies; (c) `top_k=20`, `min_p=0.05`, `repetition_penalty=1.1` send native fields including `repeat_penalty`, without reasoning for absent options; (d) LM Studio reasoning `None`/`"low"`, OpenRouter and `openai_compat` reasoning `None` have identical URL/body to string `"m"`; (e) empty/non-string ModelInfo ids, `123` and `None` raise `ConfigError` with §6.1's model message and zero requests. Native HTTP 500 errors name the id, not the ModelInfo repr; Responses `top_k=1` refusal matches the string-model message. |
 
 ### 12.4 Response parsing
 
@@ -1152,12 +1169,12 @@ Minimum fixture set per route:
 
 - `examples/basic.py` (≤ 60 lines) shows: building endpoints; `list_models`; a streamed call that prints reasoning live, then the final text, usage and cost; and a three-message repair-style follow-up.
 - `tests/test_live.py`, marked `@pytest.mark.live` and skipped unless its environment variables are set. Each live call is checked independently for valid behaviour; live results are never compared with each other.
-  - `MODELSPELL_LIVE_LMSTUDIO_URL` and `MODELSPELL_LIVE_LMSTUDIO_MODEL`: one call each with `reasoning=None`, `"high"` and `"off"`, streamed and non-streamed. The `"off"` calls assert `Result.response_id is None`, which shows that `store: false` is honoured on the native route. Also `list_models`.
+  - `MODELSPELL_LIVE_LMSTUDIO_URL` and `MODELSPELL_LIVE_LMSTUDIO_MODEL`: one call each with `reasoning=None`, `"high"` and `"off"`, streamed and non-streamed. A module-scoped fixture discovers the matching `ModelInfo` and asserts it is present. The `"off"` calls and native V2 use that entry; `None` and `"high"` retain the string id. The `"off"` calls assert `Result.response_id is None`, which shows that `store: false` is honoured on the native route. Also `list_models`. Offline live-helper coverage checks ModelInfo object identity, id recording and reasoning-options metadata for supported and extra probes.
   - `OPENROUTER_API_KEY` and `MODELSPELL_LIVE_OPENROUTER_MODEL`: one streamed call with reasoning, asserting `cost is not None`; `list_models`; `list_providers`; and verification V1 (§17).
   - `MODELSPELL_LIVE_LLAMASERVER_URL` and `MODELSPELL_LIVE_LLAMASERVER_MODEL` (added in v6, used only by V2): llama-server as an `openai_compat` server.
   - Verification V2 (§17) for each backend whose variables are set.
   - (v7) No live test asserts anything about model output (M21-3).
-- `tests/probe_lmstudio.py` (added in v7, M21-6): a diagnostic script, not a test and not run by pytest. It sends a fixed catalogue of requests to LM Studio, one per generation setting, and prints each response with a plain summary for a person to read. Nothing depends on its output. `tests/test_probe_lmstudio.py` checks offline, with a stand-in for `complete()`, only what it sends and prints: request shapes on both LM Studio routes, order, output format, error and routing-regression handling, argument errors, and that its record helper never raises on a malformed record.
+- `tests/probe_lmstudio.py` (added in v7, M21-6): a diagnostic script, not a test and not run by pytest. It discovers once, passes the matching ModelInfo or falls back to the string id, and records `model_arg: "ModelInfo"` or `"id"` in P-CONFIG. Discovery errors are recorded without preventing requests. It sends a fixed catalogue of requests to LM Studio, one per generation setting, and prints each response with a plain summary for a person to read. Only `outcome == "ok"` answers enter distinct counts, equality or stop tails; each arm reports "k ok of n". If any arm has no ok records, the probe reports only "no usable answers: <first error, 120 chars>". Nothing depends on its output. `tests/test_probe_lmstudio.py` checks offline, with a stand-in for `complete()`, only what it sends and prints: request shapes on both LM Studio routes, order, output format, error and routing-regression handling, argument errors, discovery object identity and fallback, summaries excluding errors, and that its record helper never raises on a malformed record.
   - Print an explicit summary of skipped checks.
 
 ---
@@ -1263,13 +1280,19 @@ These v1 constraints keep that path open at little cost:
 
 **v6 (package 0.2.0):** route `FIELDS` and `RANGES`, then `build_body()` taking `settings` (G10–G12); the shared setting checks (R2, R4, R5, R10–R13, R15); `supported_settings()`, `check_settings()` and exports (R14, R16, K1); the developer UI (§18.3, U3, U6–U10, then the manual check list); README, DEVEL, NEWS, design history; V2 against every available backend, classified and applied; full suite and `build_release.py --smoke`.
 
-**v7 (package 0.2.1):** `top_p` in the Responses `FIELDS` and the refusal messages (G13, R10, R14, R16); the probe diagnostic and its offline tests (§12.9); README, DEVEL, NEWS, design history; V2 on the LM Studio Responses route, with `top_p` through the named argument `accepted`; full suite and `build_release.py --smoke`.
+**v7 (package 0.2.1):** `top_p` in the Responses `FIELDS` and the refusal messages (G13, R10, R14, R16); ModelInfo argument normalisation and conditional native reasoning (M21-7–M21-9, R17); live fixture, V2 metadata and probe discovery/usable-answer summaries with offline tests (§12.9); README, DEVEL, NEWS, design history; LM Studio live checks on models with and without reasoning configuration, including V2 Responses `top_p` through the named argument `accepted`; full suite and `build_release.py --smoke` at release.
 
 ---
 
 ## 17. Implementation-time verification
 
 There are two verifications, V1 and V2. Both run in the live suite (§12.9). Record their outcomes and evidence in `tests/fixtures/README.md`. No verification decides any request default: every default in this spec is fixed.
+
+For 0.2.1, `python -m pytest -m live -s -k lmstudio` MUST pass once on a model with reasoning
+configuration and once on a model without it. These are request/response checks (HTTP status,
+transport), not checks of model output (M21-3). Native V2 records carry `model_reasoning_options`:
+the discovery tuple as a JSON list, or `null` when absent or empty. Their `model` is the id, while
+the request receives the same ModelInfo object.
 
 **V1 — OpenRouter discovery-to-routing round trip.**
 
@@ -1396,3 +1419,6 @@ From the *modelSpell 0.2.1 technical specification*, version 6. IDs are prefixed
 | M21-4 | The README says the seven unsent Responses fields are not sent, that LM Studio accepts them (and a made-up field) through `extra`, so acceptance shows nothing, and that OpenAI's reference does not define them. It does not say they are ignored. | README |
 | M21-5 | Responses refusal messages suggest `reasoning="off"` only for settings the native route sends, and mark `extra` as effect-unverified. | §6.7.2 |
 | M21-6 | `tests/probe_lmstudio.py` is a committed diagnostic with no verdicts. Its offline tests cover only what it sends and prints. | §12.9 |
+| M21-7 | `complete()` accepts a `ModelInfo` as `model` and sends its `id`. An additive API change, so 0.2.1 is not API-identical to 0.2.0. | §3, §6.1, §10.1, R17 |
+| M21-8 | On the LM Studio native route, a `ModelInfo` with no reasoning options means the body omits `reasoning`. A string model behaves as before. | §7.3, R17 |
+| M21-9 | modelSpell still never discovers or caches capabilities itself (M2-16 unchanged). It uses only what the caller passes. `check_settings()` and `supported_settings()` are unchanged, and there is no client-side refusal for options lacking `"off"`. | §6.7, §6.9, §7.3 |

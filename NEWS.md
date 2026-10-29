@@ -1,5 +1,6 @@
 # NEWS
 ## 0.2.1
+- `complete()` accepts a `ModelInfo` from `list_models()`; then `reasoning="off"` works on LM Studio models without reasoning configuration.
 - `top_p` is now sent on LM Studio's Responses route (reasoning default, low, medium, high), as OpenAI's Responses reference defines.
 - Refusals on that route suggest `reasoning="off"` only where it helps, and mark `extra` as effect-unverified.
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import test_live as live
-from modelspell import Endpoint, supported_settings
+from modelspell import Endpoint, ModelInfo, supported_settings
 
 
 @pytest.mark.parametrize("kind,reasoning", [
@@ -61,3 +61,26 @@ def test_v2_metadata_does_not_consume_request_arguments(monkeypatch, capsys, kin
     lines = capsys.readouterr().out.splitlines()
     assert all(line.startswith("V2 ") for line in lines)
     assert [json.loads(line[3:]) for line in lines] == records
+
+
+@pytest.mark.parametrize("options", [None, ("off", "on")])
+def test_v2_model_info_identity_and_metadata(monkeypatch, capsys, options):
+    info = ModelInfo(id="m", name=None, context_length=None, loaded=None, supports_tools=None,
+                     supports_reasoning=None, reasoning_options=options, pricing=None, raw={})
+    calls = []
+
+    def complete(endpoint, model, prompt, **kw):
+        assert model is info
+        calls.append(model)
+        return SimpleNamespace(provider=None)
+
+    monkeypatch.setattr(live, "complete", complete)
+    endpoint = Endpoint(kind="lmstudio")
+    meta = dict(backend="lmstudio", route="lmstudio_native",
+                model_reasoning_options=list(options) if options else None)
+    records = live._v2_supported(endpoint, info, "lmstudio", "off", **meta)
+    records += live._v2_extra(endpoint, info, [("temperature", 1)], reasoning="off", **meta)
+    assert len(calls) == len(records) > 1
+    assert all(rec["model"] == "m" and rec["model_reasoning_options"] is meta["model_reasoning_options"]
+               for rec in records)
+    assert [json.loads(line[3:]) for line in capsys.readouterr().out.splitlines()] == records
