@@ -109,10 +109,12 @@ checked on its own:
 | llama-server (V2 only, as `openai_compat`) | `MODELSPELL_LIVE_LLAMASERVER_URL` (including `/v1`), `MODELSPELL_LIVE_LLAMASERVER_MODEL` |
 
 The LM Studio model may have reasoning configuration or none: native tests pass its `ModelInfo`
-from a module-scoped discovery fixture; Responses tests retain the string id. For the 0.2.1 release,
-run `python -m pytest -m live -s -k lmstudio` once with each kind (for example `qwen3.8-27b` and
-`qwen3-coder-next`). Record both runs in `tests/fixtures/README.md`; native V2 records carry
-`model_reasoning_options`. These checks concern HTTP acceptance and transport, not model output.
+from a module-scoped discovery fixture; Responses tests retain the string id. Native V2 records carry
+`model_reasoning_options`. When a change touches LM Studio's native request, run
+`python -m pytest -m live -s -k "test_live_lmstudio and off"` once with a model that has reasoning
+configuration and once with one that has none (two short requests each), and record both in
+`tests/fixtures/README.md`. These checks concern HTTP acceptance and transport, not model output.
+The probe is a diagnostic and is never part of a release check.
 The probe also discovers once, passes the matching entry (or falls back to the id), and reports
 only usable answers in its summaries, including each arm's ok count.
 

@@ -1288,8 +1288,10 @@ These v1 constraints keep that path open at little cost:
 
 There are two verifications, V1 and V2. Both run in the live suite (§12.9). Record their outcomes and evidence in `tests/fixtures/README.md`. No verification decides any request default: every default in this spec is fixed.
 
-For 0.2.1, `python -m pytest -m live -s -k lmstudio` MUST pass once on a model with reasoning
-configuration and once on a model without it. These are request/response checks (HTTP status,
+For 0.2.1, `python -m pytest -m live -s -k "test_live_lmstudio and off"` MUST pass once on a model with
+reasoning configuration and once on a model without it (two short requests each), and V2's Responses
+record for `top_p` through the named argument MUST be `accepted`. Both were met on 29 October 2026
+(`tests/fixtures/README.md`). These are request/response checks (HTTP status,
 transport), not checks of model output (M21-3). Native V2 records carry `model_reasoning_options`:
 the discovery tuple as a JSON list, or `null` when absent or empty. Their `model` is the id, while
 the request receives the same ModelInfo object.

@@ -67,7 +67,8 @@ Run with `python -m pytest -m live -s -k v2` (variables in `DEVEL.md`). Paste ea
 | OpenRouter | n/a (hosted) | chat_completions | qwen/qwen3-coder-next, pinned `parasail/bf16` (first listed), no fallbacks, no `require_parameters` | **run 27 Oct 2026** |
 | LM Studio | 0.4.21 (Build 2) | lmstudio_native | qwen3.8-27b | **run 28 Oct 2026** |
 | LM Studio | 0.4.21 (Build 2) | responses | qwen3.8-27b | **run 28 Oct 2026** |
-| LM Studio | *to record* | responses (0.2.1 working copy) | *to record* | **pending**: required before releasing 0.2.1 |
+| LM Studio | not captured | responses (0.2.1) | qwen3-coder-next, qwen3.8-27b | **run 29 Oct 2026** |
+| LM Studio | not captured | lmstudio_native (0.2.1, `reasoning="off"` with `ModelInfo`) | qwen3-coder-next, qwen3.8-27b | **run 29 Oct 2026** |
 | llama-server (`openai_compat`) | b9910-f5525f7e7 | chat_completions | qwen3-coder-next | **run 28 Oct 2026** |
 
 OpenRouter, 27 Oct 2026: all 10 supported settings `accepted` (served by Parasail), effect unverified.
@@ -97,19 +98,67 @@ ignored without error. So `repetition_penalty` is accepted and silently ignored.
 route limitation; M2-3's exclusion of `repetition_penalty` on `openai_compat` confirmed. No table
 change. This verifies llama-server only, not other `openai_compat` servers.
 
-### 0.2.1 live checks (pending)
+### 0.2.1 live checks (29 Oct 2026)
 
-Before releasing 0.2.1, the owner will run `python -m pytest -m live -s -k lmstudio` from the 0.2.1
-working copy once for `qwen3-coder-next` and once for `qwen3.8-27b`, and paste both runs here with
-the date and LM Studio version. Native V2 records include `model_reasoning_options`. The release needs
-the record `setting: "top_p", via: "argument"` to be `accepted`. An `unrelated` record means re-run.
-A 4xx naming `top_p` is classified under spec v7 §17 before anything else is decided.
+Run on 29 Oct 2026 against LM Studio on the owner's machine (LM Studio version not captured: V2
+records `version: null`) with `qwen3-coder-next` (unsloth, Q4_K_M, gguf; no reasoning configuration)
+and `qwen3.8-27b` (reasoning configuration). These are acceptance and transport checks only (M21-3).
 
-**Model limitation, 29 Oct 2026.** Before this change, LM Studio refused every native-route request
+**`top_p` on the Responses route (M21-1), from the 0.2.1 working copy at `9232d7d`.** The record
+`setting: "top_p", via: "argument"` is `accepted` for both models, so the release condition is met. The
+seven unsent settings were again `accepted` through `extra`, which shows nothing (M21-4). The
+`af5a0d1` change leaves Responses request bodies unchanged for a string model (R17d, offline).
+
+`qwen3-coder-next`, `python -m pytest -m live -s -k v2_lmstudio_responses`:
+
+```
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "max_tokens", "value": 64, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "temperature", "value": 0.7, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "top_p", "value": 0.9, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "frequency_penalty", "value": 0.5, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "min_p", "value": 0.05, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "presence_penalty", "value": 0.5, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "repetition_penalty", "value": 1.1, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "seed", "value": 42, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "stop", "value": ["\n\n\n\n"], "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3-coder-next", "provider": null, "setting": "top_k", "value": 20, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+```
+
+`qwen3.8-27b`, `python -m pytest -m live -s -k lmstudio` (9 passed), both routes:
+
+```
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "max_tokens", "value": 64, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "min_p", "value": 0.05, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "repetition_penalty", "value": 1.1, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "temperature", "value": 0.7, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "top_k", "value": 20, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "top_p", "value": 0.9, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "temperature", "value": 1, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "lmstudio_native", "model": "qwen3.8-27b", "provider": null, "setting": "temperature", "value": 1.01, "via": "extra", "outcome": "refused", "status": 400, "error": "BackendError", "detail": "provider returned HTTP 400 for 'qwen3.8-27b' at http://localhost:1234/api/v1/chat: {\n  \"error\": {\n    \"message\": \"Number must be less than or equal to 1\",\n    \"type\": \"invalid_request\",\n    \"code\": \"too_big\",\n    \"param\": \"temperature\"\n  }\n}"}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "max_tokens", "value": 64, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "temperature", "value": 0.7, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "top_p", "value": 0.9, "via": "argument", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "frequency_penalty", "value": 0.5, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "min_p", "value": 0.05, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "presence_penalty", "value": 0.5, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "repetition_penalty", "value": 1.1, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "seed", "value": 42, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "stop", "value": ["\n\n\n\n"], "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+V2 {"backend": "lmstudio", "version": null, "route": "responses", "model": "qwen3.8-27b", "provider": null, "setting": "top_k", "value": 20, "via": "extra", "outcome": "accepted", "effect": "effect_unverified", "status": 200, "served_by": null}
+```
+
+Classification: `temperature` 1.01 on the native route refused by LM Studio's validation (`too_big`),
+an expected out-of-range refusal. No table change.
+
+**`reasoning="off"` with a `ModelInfo` (M21-7, M21-8), from `af5a0d1`.** `python -m pytest -m live -s
+-k "test_live_lmstudio and off"` (one streamed and one non-streamed native call with the model's
+`ModelInfo`): **2 passed** for `qwen3-coder-next`, which LM Studio refused before the change, and
+**2 passed** for `qwen3.8-27b`.
+
+**Model limitation, 29 Oct 2026, before `af5a0d1`.** LM Studio refused every native-route request
 for `qwen3-coder-next` (HTTP 400, `param: reasoning`, "does not expose reasoning configuration"),
-while `qwen3.8-27b` passed. Resolved in 0.2.1 by M21-8 for callers that pass the model's `ModelInfo`.
-The two release-check runs above remain pending; this historical report is not verification of
-the updated implementation.
+while `qwen3.8-27b` passed. Classified as a model limitation (spec v7 §17). Resolved in 0.2.1 by M21-8
+for callers that pass the model's `ModelInfo`; with a string model, LM Studio still refuses it.
 
 ### History
 
