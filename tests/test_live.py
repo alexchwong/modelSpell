@@ -1,7 +1,7 @@
 """Opt-in live checks (spec §12.9, §17). Run: pytest -m live -rs
 
 LM Studio:    MODELSPELL_LIVE_LMSTUDIO_URL, MODELSPELL_LIVE_LMSTUDIO_MODEL
-OpenRouter:   OPENROUTER_API_KEY, MODELSPELL_LIVE_OPENROUTER_MODEL
+OpenRouter:   OPENROUTER_API_KEY, MODELSPELL_LIVE_OPENROUTER_MODEL, MODELSPELL_LIVE_OPENROUTER_PROVIDER (optional)
 llama-server: MODELSPELL_LIVE_LLAMASERVER_URL (including /v1), MODELSPELL_LIVE_LLAMASERVER_MODEL  (V2 only)
 Each call is checked on its own; live results are never compared with each other.
 """
@@ -17,6 +17,7 @@ from modelspell import (AuthError, BackendError, ConnectError, Endpoint, ModelSp
 pytestmark = pytest.mark.live
 LMS_URL, LMS_MODEL = os.environ.get("MODELSPELL_LIVE_LMSTUDIO_URL"), os.environ.get("MODELSPELL_LIVE_LMSTUDIO_MODEL")
 OR_KEY, OR_MODEL = os.environ.get("OPENROUTER_API_KEY"), os.environ.get("MODELSPELL_LIVE_OPENROUTER_MODEL")
+OR_PROVIDER = os.environ.get("MODELSPELL_LIVE_OPENROUTER_PROVIDER")
 need_lms = pytest.mark.skipif(not (LMS_URL and LMS_MODEL), reason="LM Studio live env vars not set")
 need_or = pytest.mark.skipif(not (OR_KEY and OR_MODEL), reason="OpenRouter live env vars not set")
 LLS_URL = os.environ.get("MODELSPELL_LIVE_LLAMASERVER_URL")
@@ -32,13 +33,22 @@ def _streamed(endpoint, model, **kw):
     return r
 
 
+@pytest.fixture(scope="module")
+def lms_info():
+    models = list_models(Endpoint(kind="lmstudio", base_url=LMS_URL))
+    info = next((m for m in models if m.id == LMS_MODEL), None)
+    assert info is not None, f"{LMS_MODEL!r} not returned by list_models; ids: {[m.id for m in models]}"
+    return info
+
+
 @need_lms
 @pytest.mark.parametrize("reasoning", [None, "high", "off"])
 @pytest.mark.parametrize("stream", [False, True])
-def test_live_lmstudio(reasoning, stream):
+def test_live_lmstudio(reasoning, stream, lms_info):
     e = Endpoint(kind="lmstudio", base_url=LMS_URL)
     kw = dict(reasoning=reasoning, max_tokens=1024, timeout=600)
-    r = _streamed(e, LMS_MODEL, **kw) if stream else complete(e, LMS_MODEL, PROMPT, **kw)
+    model = lms_info if reasoning == "off" else LMS_MODEL
+    r = _streamed(e, model, **kw) if stream else complete(e, model, PROMPT, **kw)
     assert r.transport == ("lmstudio_native" if reasoning == "off" else "responses")
     assert r.text or r.truncated
     if reasoning == "off":
@@ -97,10 +107,14 @@ V2_PROMPT = [{"role": "user", "content": "Say ok."}]
 CHAT_WIRE = {n: n for n in V2_VALUES}  # wire names used when probing a route through extra
 
 
-def _v2_attempt(endpoint, model, *, backend, route, version=None, provider=None, setting, value, via="argument",
-                **kw):
-    rec = dict(backend=backend, version=version, route=route, model=model, provider=provider, setting=setting,
+def _v2_attempt(endpoint, model, *, meta, setting, value, via="argument", **kw):
+    rec = dict(backend=meta["backend"], version=meta.get("version"), route=meta["route"], model=getattr(model, "id", model),
+               provider=meta.get("provider"), setting=setting,
                value=value, via=via)
+    if "pin_source" in meta:
+        rec["pin_source"] = meta["pin_source"]
+    if "model_reasoning_options" in meta:
+        rec["model_reasoning_options"] = meta["model_reasoning_options"]
     try:
         r = complete(endpoint, model, V2_PROMPT, on_text=lambda s: None, timeout=300, **kw)
         rec.update(outcome="accepted", effect="effect_unverified", status=200, served_by=r.provider)
@@ -125,7 +139,7 @@ def _v2_supported(endpoint, model, kind, reasoning, **meta):
     for name in sorted(supported_settings(kind, reasoning) - {"reasoning", "provider"}):
         kw = dict(base, max_tokens=V2_VALUES["max_tokens"])
         kw[name] = V2_VALUES[name]
-        records.append(_v2_attempt(endpoint, model, setting=name, value=V2_VALUES[name], **meta, **kw))
+        records.append(_v2_attempt(endpoint, model, setting=name, value=V2_VALUES[name], meta=meta, **kw))
     return records
 
 
@@ -136,8 +150,17 @@ def _v2_extra(endpoint, model, cases, reasoning=None, provider_pin=None, **meta)
         base["reasoning"] = reasoning
     if provider_pin:
         base["provider"] = {"order": [provider_pin], "allow_fallbacks": False}
-    return [_v2_attempt(endpoint, model, setting=wire, value=value, via="extra", extra={wire: value}, **meta, **base)
+    return [_v2_attempt(endpoint, model, setting=wire, value=value, via="extra", extra={wire: value}, meta=meta, **base)
             for wire, value in cases]
+
+
+def _v2_require_acceptance(records):
+    if any(r["outcome"] == "accepted" for r in records):
+        return
+    failures = list(dict.fromkeys((r.get("status"), r.get("error")) for r in records))
+    detail = next((r["detail"] for r in records if r.get("detail")), "")[:200]
+    raise AssertionError("No request reached a model; this run verifies nothing. "
+                         f"Distinct (status, error) pairs: {failures!r}; detail: {detail}")
 
 
 def _v2_fail_on_refusals(records):
@@ -148,22 +171,33 @@ def _v2_fail_on_refusals(records):
 @need_or
 def test_live_v2_openrouter():
     e = Endpoint(kind="openrouter")
-    pin = next((p.slug for p in list_providers(e, OR_MODEL) if p.slug), None)
-    meta = dict(backend="openrouter", route="chat_completions", provider=pin)
+    providers = list_providers(e, OR_MODEL)
+    slugs = [p.slug for p in providers if p.slug]
+    if OR_PROVIDER is not None:
+        assert OR_PROVIDER in slugs, (
+            f"MODELSPELL_LIVE_OPENROUTER_PROVIDER={OR_PROVIDER!r} does not match an available slug; "
+            f"available slugs: {slugs!r}")
+        pin, pin_source = OR_PROVIDER, "env"
+    else:
+        pin, pin_source = next(iter(slugs), None), "first_listed"
+    meta = dict(backend="openrouter", route="chat_completions", provider=pin, pin_source=pin_source)
     records = _v2_supported(e, OR_MODEL, "openrouter", None, **meta)
     ranges = [("temperature", 2), ("temperature", 2.01), ("repetition_penalty", 2), ("repetition_penalty", 2.01)]
     for name in ("presence_penalty", "frequency_penalty"):
         ranges += [(name, -2), (name, -2.01), (name, 2), (name, 2.01)]
     _v2_extra(e, OR_MODEL, ranges, provider_pin=pin, **meta)
+    _v2_require_acceptance(records)
     _v2_fail_on_refusals(records)
 
 
 @need_lms
-def test_live_v2_lmstudio_native():
+def test_live_v2_lmstudio_native(lms_info):
     e = Endpoint(kind="lmstudio", base_url=LMS_URL)
-    meta = dict(backend="lmstudio", route="lmstudio_native")
-    records = _v2_supported(e, LMS_MODEL, "lmstudio", "off", **meta)
-    _v2_extra(e, LMS_MODEL, [("temperature", 1), ("temperature", 1.01)], reasoning="off", **meta)
+    meta = dict(backend="lmstudio", route="lmstudio_native",
+                model_reasoning_options=list(lms_info.reasoning_options) if lms_info.reasoning_options else None)
+    records = _v2_supported(e, lms_info, "lmstudio", "off", **meta)
+    _v2_extra(e, lms_info, [("temperature", 1), ("temperature", 1.01)], reasoning="off", **meta)
+    _v2_require_acceptance(records)
     _v2_fail_on_refusals(records)
 
 
@@ -174,6 +208,7 @@ def test_live_v2_lmstudio_responses():
     records = _v2_supported(e, LMS_MODEL, "lmstudio", "low", **meta)
     unsupported = sorted(set(V2_VALUES) - supported_settings("lmstudio", "low"))
     _v2_extra(e, LMS_MODEL, [(CHAT_WIRE[n], V2_VALUES[n]) for n in unsupported], reasoning="low", **meta)
+    _v2_require_acceptance(records)
     _v2_fail_on_refusals(records)
 
 
@@ -195,4 +230,5 @@ def test_live_v2_llamaserver_openai_compat():
     records = _v2_supported(e, LLS_MODEL, "openai_compat", None, **meta)
     # checks 3 and 4: the one unsupported setting, under both server names
     _v2_extra(e, LLS_MODEL, [("repetition_penalty", 1.1), ("repeat_penalty", 1.1)], **meta)
+    _v2_require_acceptance(records)
     _v2_fail_on_refusals(records)

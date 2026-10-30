@@ -8,10 +8,11 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 from . import _http
 from ._routes import Acc, chat, lmstudio_native, responses
 from ._sse import iter_sse
-from ._types import KINDS, Endpoint, Message, Result
+from ._types import KINDS, Endpoint, Message, ModelInfo, Result
 from .errors import AuthError, Cancelled, ConfigError, UnsupportedSetting
 
 _REASONING = ("off", "low", "medium", "high")
+_MODEL_RULE = "model must be a non-empty str or a ModelInfo with a non-empty id"
 # Generation settings checked and sent from the support tables, in spec order (v6 §6.8).
 _SAMPLING = ("max_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty",
              "frequency_penalty", "seed", "stop")
@@ -93,8 +94,12 @@ def _supported(kind: str, route: _Route) -> frozenset[str]:
 
 
 def _unsupported_message(name: str, route: _Route) -> str:
-    if route.module is responses:
-        return f'{name} is not supported on {route.label}; use reasoning="off" or pass it through extra'
+    if route.module is responses:  # spec v7 §6.7.2 (M21-5): suggest reasoning="off" only where it helps
+        if name in lmstudio_native.FIELDS:
+            return (f'{name} is not supported on {route.label}; use reasoning="off", '
+                    "or pass it through extra (effect unverified)")
+        return (f"{name} is not supported on {route.label} or the LM Studio native route; "
+                "pass it through extra (effect unverified)")
     return f"{name} is not supported on {route.label}; pass it through extra"
 
 
@@ -179,11 +184,21 @@ def _messages(input: Any) -> list[dict]:
     return out
 
 
-def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, callbacks) -> _Route:
+def _model_arg(model: Any) -> tuple[str, ModelInfo | None]:
+    """The model id to send, and the caller's discovery entry if one was passed (spec v7 §6.1, M21-7)."""
+    if isinstance(model, ModelInfo):
+        if not isinstance(model.id, str) or not model.id:
+            raise ConfigError(_MODEL_RULE)
+        return model.id, model
+    if not isinstance(model, str) or not model:
+        raise ConfigError(_MODEL_RULE)
+    return model, None
+
+
+def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, callbacks) -> tuple[_Route, str, ModelInfo | None]:
     if not isinstance(endpoint, Endpoint):
         raise ConfigError("endpoint must be an Endpoint")
-    if not isinstance(model, str) or not model:
-        raise ConfigError("model must be a non-empty str")
+    model_id, info = _model_arg(model)
     route = _check_settings(endpoint.kind, reasoning, settings, provider)
     if extra is not None and (not isinstance(extra, Mapping) or {"model", "stream"} & set(extra)):
         raise ConfigError("extra must be a mapping without the keys 'model' or 'stream'")
@@ -191,12 +206,12 @@ def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, ca
         raise ConfigError("timeout must be a number > 0")
     if any(cb is not None and not callable(cb) for cb in callbacks):
         raise ConfigError("on_text and on_reasoning must be None or callable")
-    return route
+    return route, model_id, info
 
 
 def complete(
     endpoint: Endpoint,
-    model: str,
+    model: str | ModelInfo,
     input: str | Sequence[Message | Mapping[str, str]],
     *,
     reasoning: Literal["off", "low", "medium", "high"] | None = None,
@@ -219,7 +234,7 @@ def complete(
     settings = dict(max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
                     repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
                     frequency_penalty=frequency_penalty, seed=seed, stop=stop)
-    route = _validate(endpoint, model, reasoning, settings, provider, extra, timeout, (on_text, on_reasoning))
+    route, model_id, info = _validate(endpoint, model, reasoning, settings, provider, extra, timeout, (on_text, on_reasoning))
     messages = _messages(input)
     key = endpoint._resolve_key()
     if endpoint.kind == "openrouter" and not key:
@@ -233,14 +248,19 @@ def complete(
         url = f"{endpoint.base_url}/chat/completions"
 
     streaming = on_text is not None or on_reasoning is not None
-    body = route.module.build_body(messages, model, reasoning=reasoning, provider=provider,
+    # spec v7 §7.3 (M21-8): a model with no reasoning configuration has nothing to turn off, and LM Studio
+    # refuses reasoning="off" for it, so the native body omits the field. Only when the caller passed a ModelInfo.
+    body_reasoning = reasoning
+    if route.module is lmstudio_native and info is not None and not info.reasoning_options:
+        body_reasoning = None
+    body = route.module.build_body(messages, model_id, reasoning=body_reasoning, provider=provider,
                                    settings={k: v for k, v in settings.items() if v is not None},
                                    streaming=streaming, kind=endpoint.kind)
     body.update(extra or {})
     cap = body.get("max_output_tokens")
     cap = cap if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1 else None
 
-    call = _http.Call(url=url, key=key, timeout=timeout, model=model, route=route.hint)
+    call = _http.Call(url=url, key=key, timeout=timeout, model=model_id, route=route.hint)
     response = _http.post(call, body, endpoint.headers)
     acc = Acc(route.module.TRANSPORT, on_text, on_reasoning)
     try:

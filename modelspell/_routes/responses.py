@@ -13,9 +13,9 @@ TRANSPORT = "responses"
 _TERMINAL = {"response.completed", "response.incomplete", "response.failed"}
 
 
-# Support table (spec v6 §6.7): only temperature and max_tokens are sent on this route; LM Studio's
-# Responses documentation lists no sampling fields it honours (§7.2's rule, M2-3).
-FIELDS = {"temperature": "temperature", "max_tokens": "max_output_tokens"}
+# Support table (spec v7 §6.7): the generation settings OpenAI's Responses reference defines, which
+# LM Studio's Responses page refers to (M21-2). The other seven sampling arguments are refused.
+FIELDS = {"temperature": "temperature", "max_tokens": "max_output_tokens", "top_p": "top_p"}
 RANGES: dict = {}
 LABEL = 'the LM Studio Responses route (reasoning other than "off")'
 

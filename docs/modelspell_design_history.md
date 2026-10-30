@@ -1,7 +1,7 @@
 # modelSpell v1 — design history
 
-**Status:** Informative. This document records how the specification reached its current form. It is not part of the implementation contract; `modelspell_v1_spec_v6.md` is the only authoritative description of behaviour. Section and test references below use the current spec's numbering, which has not changed since spec v2 except by addition (v5 added §18 and K7; v6 added §6.7–§6.9, G10–G12, R10–R16, U6–U10 and V2).
-**Date:** 20 October 2026; round 5 added 27 October 2026
+**Status:** Informative. This document records how the specification reached its current form. It is not part of the implementation contract; `modelspell_v1_spec_v7.md` is the only authoritative description of behaviour. Section and test references below use the current spec's numbering, which has not changed since spec v2 except by addition (v5 added §18 and K7; v6 added §6.7–§6.9, G10–G12, R10–R16, U6–U10 and V2; v7 added G13 and §19).
+**Date:** 20 October 2026; round 5 added 27 October 2026; round 6 added 28 October 2026
 
 ## Document lineage
 
@@ -13,7 +13,9 @@
 | `modelspell_v1_spec_v4.md` | 20 October 2026 | — | Implemented as package 0.1.0 |
 | `modelspell_v1_spec_v5.md` | 20 October 2026 | — | Round 4 (post-implementation) tooling decisions; library behaviour unchanged. Implemented as package 0.1.0 |
 | *modelSpell 0.2.0 technical specification* v1–v3 | 27 October 2026 | *modelSpell 0.2.0 technical specification — review v1* (against v2) | Round 5; v3 implemented as package 0.2.0 and folded into spec v6 |
-| `modelspell_v1_spec_v6.md` | 27 October 2026 | — | Current. Generation settings (package 0.2.0) |
+| `modelspell_v1_spec_v6.md` | 27 October 2026 | — | Generation settings (package 0.2.0) |
+| *modelSpell 0.2.1 technical specification* v1–v6 | 28 October 2026 | *review v1* to *review v5*, each against the version before it; *review v3* was not seen by the author of v4 to v6; v4 was based on the implementer's in-conversation review of v3 | Round 6; v6 implemented as package 0.2.1 and folded into spec v7 |
+| `modelspell_v1_spec_v7.md` | 28 October 2026 | — | Current. `top_p` on LM Studio Responses (package 0.2.1) |
 
 ---
 
@@ -115,3 +117,56 @@ Requested by AgentWiz release plan v10.1, decision R2-19 (advanced task settings
 
 - `settings_sent` includes the provider pin when one is set, because §18.3 defines it as the generation arguments passed to `complete()`, and `provider` is one.
 - V2 has **not** been run: no LM Studio, OpenRouter key or llama-server was reachable from the implementation environment. Every support-table row ships as documented and is marked unverified in the README. No table or range has changed from the technical specification.
+
+---
+
+## Round 6 — `top_p` on LM Studio Responses (spec v7, package 0.2.1)
+
+Requested by the owner after an LM Studio Responses probe on 28 October 2026. Specified in the *modelSpell 0.2.1 technical specification*, versions 1–6 (28 October 2026). The decisions are listed in spec v7 §19:
+
+- **M21-1:** `top_p` on the Responses route.
+- **M21-2:** documentation by reference.
+- **M21-3:** no decision depends on model output.
+- **M21-4:** README wording for the other seven fields.
+- **M21-5:** refusal messages.
+- **M21-6:** the probe diagnostic.
+
+**Withdrawn: effect checks of model output (versions 1–5).** Versions 1 to 5 admitted `top_p` on effect evidence. Their check was E1, a live comparison of sampled answers. It grew a release gate and campaigns, and an evidence rule with "E-checks". Each review then found, correctly, a further gap:
+
+- what `top_p=0.01` proves;
+- incomplete answers counted as valid;
+- a weak comparison rule;
+- retries that undid the false-pass bound;
+- interrupted sessions invisible to the gate.
+
+The cause was structural. A test on sampled output is a statistical test, and making it sound kept adding machinery. It also held one field to a bar no other modelSpell setting meets, since modelSpell claims "sent", never "applied", for every route (§6.7.3). Version 6 withdrew the approach. It admitted `top_p` on the same basis `temperature` and `max_output_tokens` already had: LM Studio's Responses page refers to OpenAI's Responses reference, which defines all three. The release gate became deterministic: the offline suite, plus V2 acceptance of `top_p` through the named argument.
+
+**Reversed:** review v2's wording (V2-2, adopted in the specification's version 3), "a reference to another API's documentation alone does not qualify as route documentation". It is replaced by M21-2.
+
+**Not adopted:**
+
+- review v1's per-server comparison table for `openai_compat`, which is unrelated and listed as a follow-up;
+- an offline test of disagreement between E1 sessions (version 2), made moot by the withdrawal.
+
+**Evidence.** On 28 October an informal probe was run (`qwen3.8-27b`, reasoning "low"). `top_p=0.01` gave three identical answers where the baseline gave three different ones. No other unsent field showed an effect. That observation prompted the change; it is not its basis (M21-3). It is summarised in `tests/fixtures/README.md`.
+
+**ModelInfo addition (29 October 2026, M21-7–M21-9).** LM Studio refused native requests for
+`qwen3-coder-next` with HTTP 400: "does not expose reasoning configuration" (`param: reasoning`).
+The owner checked with curl that the same request without `reasoning` succeeded:
+`{"model":"qwen3-coder-next","input":"Say ok.","store":false,"top_k":20}` returned a normal answer.
+`list_models()` already exposes the missing configuration as `ModelInfo.reasoning_options=None`.
+The caller may now pass that entry to `complete()`, which sends its id and omits native `reasoning`
+when the options are absent or empty. String models behave as before. The 0.2.1 technical
+specification (v6) said "public API unchanged"; this additive API change, decided by the owner,
+supersedes that statement. Package 0.2.1 is no longer API-identical to 0.2.0; spec v7 is amended
+in place. No library discovery or cache is introduced, and the settings helpers remain unchanged.
+Non-empty options lacking `"off"` are left to the server, keeping settings validation consistent.
+
+Alternatives rejected:
+
+- Discovery inside `complete()`: two requests per call, and contrary to M2-16.
+- Retry on HTTP 400: contrary to the no-retries contract.
+- Always omitting `reasoning`: reasoning models would then reason.
+- A new parameter: `ModelInfo` already carries the information.
+
+**Follow-up:** the developer UI still passes the model id string; changing it is outside this work.

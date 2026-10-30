@@ -1,7 +1,7 @@
 # Developer guide
 
 This file is for repository maintenance. Library usage is documented in `README.md`; the
-behavioural contract is `docs/modelspell_v1_spec_v6.md`; agent operating rules are in
+behavioural contract is `docs/modelspell_v1_spec_v7.md`; agent operating rules are in
 `.clinerules`. Nothing in this guide, `.clinerules`, `tests/`, `ui/`, `scripts/`, `examples/`
 or `docs/` ships in the release wheel.
 
@@ -36,12 +36,12 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 | `modelspell/` | yes | The library. Import name `modelspell`; distribution name `modelSpell`. |
 | `modelspell/_version.py` | yes | Single source of the version (`__version__ = "X.Y.Z"`). |
 | `pyproject.toml`, `README.md`, `LICENSE` | metadata | Packaging, wheel description, MIT license. |
-| `tests/` | no | Offline suite, fixtures, golden request bodies, opt-in live suite. |
+| `tests/` | no | Offline suite, fixtures, golden request bodies, opt-in live suite, and the LM Studio probe diagnostic (`tests/probe_lmstudio.py`). |
 | `ui/` | no | Developer test UI (`python -m ui`). |
 | `scripts/build_release.py` | no | Builds and verifies the release wheel. |
 | `scripts/smoke_installed.py` | no | Smoke test run against an installed wheel (K3, `--smoke`). |
 | `examples/basic.py` | no | Usage example against a local LM Studio. |
-| `docs/` | no | Spec v6 (authoritative), spec v5 (superseded, kept as history) and design history (informative). |
+| `docs/` | no | Spec v7 (authoritative), specs v5 and v6 (superseded, kept as history) and design history (informative). |
 | `.clinerules` | no | Agent operating rules; process detail lives in this guide. |
 | `.gitattributes` | no | Line-ending policy (`* text=auto eol=lf`). |
 | `.github/workflows/` | no | `tests.yml` (push, PR) and `release.yml` (push to `main`). |
@@ -67,6 +67,27 @@ Changes under `modelspell/` must keep these; tests enforce most of them.
 - **The public API is exactly `modelspell.__all__`** (K1). Field changes to public dataclasses
   update the spec and the K1 snapshot together.
 
+### Overloaded `provider` terminology
+
+`provider` has different meanings depending on context:
+
+- In `complete(provider=...)` and `check_settings(provider=...)`, it is an OpenRouter routing
+  mapping, such as `{"order": ["deepinfra/turbo"], "allow_fallbacks": False}`.
+- `Result.provider` is the provider string reported by the response, not a routing mapping or
+  necessarily the endpoint slug requested by the caller.
+- `ProviderInfo.name` is a display name; `ProviderInfo.slug` is the endpoint tag used for routing.
+  Do not derive a slug from the display name or assume they are interchangeable.
+- The UI connection setting `provider` stores a selected endpoint slug and is converted into a
+  routing mapping before calling `complete()`.
+- In V2 evidence, `provider` records the requested endpoint pin, while `served_by` records
+  `Result.provider` from the response.
+
+Keep evidence metadata separate from completion arguments in helper interfaces. Flattening both
+into one keyword namespace can collide on `provider`; a metadata parameter named `provider` can
+also consume the routing argument instead of forwarding it. Prefer explicit metadata mappings
+and internal names such as `provider_slug` for endpoint identifiers. Preserve the public API and
+wire-field names; their context and types distinguish their meanings.
+
 ## Tests
 
 ```bash
@@ -84,16 +105,43 @@ checked on its own:
 | Backend | Variables |
 |---|---|
 | LM Studio | `MODELSPELL_LIVE_LMSTUDIO_URL` (e.g. `http://localhost:1234/v1`), `MODELSPELL_LIVE_LMSTUDIO_MODEL` |
-| OpenRouter | `OPENROUTER_API_KEY`, `MODELSPELL_LIVE_OPENROUTER_MODEL` (`author/slug`) |
+| OpenRouter | `OPENROUTER_API_KEY`, `MODELSPELL_LIVE_OPENROUTER_MODEL` (`author/slug`); optional `MODELSPELL_LIVE_OPENROUTER_PROVIDER` (provider slug from `list_providers`; default: first listed provider with a slug) |
 | llama-server (V2 only, as `openai_compat`) | `MODELSPELL_LIVE_LLAMASERVER_URL` (including `/v1`), `MODELSPELL_LIVE_LLAMASERVER_MODEL` |
+
+The LM Studio model may have reasoning configuration or none: native tests pass its `ModelInfo`
+from a module-scoped discovery fixture; Responses tests retain the string id. Native V2 records carry
+`model_reasoning_options`. When a change touches LM Studio's native request, run
+`python -m pytest -m live -s -k "test_live_lmstudio and off"` once with a model that has reasoning
+configuration and once with one that has none (two short requests each), and record both in
+`tests/fixtures/README.md`. These checks concern HTTP acceptance and transport, not model output.
+The probe is a diagnostic and is never part of a release check.
+The probe also discovers once, passes the matching entry (or falls back to the id), and reports
+only usable answers in its summaries, including each arm's ok count.
 
 Run verification V1 with
 `python -m pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip`
 and record the printed evidence in `tests/fixtures/README.md`.
 
-**Verification V2** (spec v6 §17) checks the generation-settings tables against real servers
+**Verification V2** (spec v7 §17) checks the generation-settings tables against real servers
 before a release that changes them. Run `python -m pytest -m live -s -k v2`. Each call prints one
 `V2 {...}` JSON line with backend, version, route, model, provider, setting, value and outcome.
+
+OpenRouter accounts with privacy settings or guardrails should pin an allowed provider with
+`MODELSPELL_LIVE_OPENROUTER_PROVIDER`. Its value must exactly match a slug returned by
+`list_providers`; an invalid value fails without falling back to another provider. OpenRouter
+records include `pin_source` (`env` or `first_listed`). Discovery does not guarantee that account
+guardrails allow a listed provider.
+
+A run in which no supported setting is accepted fails after all probes have printed. Re-run it;
+it verifies nothing and must not be recorded as verification evidence. This acceptance check
+uses only supported-setting probes, not `extra` probes, which may legitimately be refused.
+Partial unrelated failures still need human classification even when the acceptance check passes.
+
+The V2 attempt helper takes evidence in an explicit `meta` mapping, separate from completion
+arguments, so the evidence's provider slug cannot collide with or consume request routing.
+Offline regression checks in `tests/test_live_helpers.py` cover supported-setting and `extra`
+probes on all routes, including provider forwarding and printed evidence. Run them with
+`python -m pytest tests/test_live_helpers.py`; they require no live credentials.
 
 - `accepted` means the request succeeded; it never means the setting was applied
   (`effect_unverified`). `refused` is a 4xx attributable to the request; `unrelated` is auth,
@@ -101,10 +149,25 @@ before a release that changes them. Run `python -m pytest -m live -s -k v2`. Eac
 - A refused *supported* setting fails the test. Classify it before release as a route limitation
   (same refusal across models/providers, or documented: move the setting to "—" for that route),
   a model or provider limitation (record it; the README lists it; the table does not change), or
-  unrelated. Ranges change only on the evidence rule in spec v6 §6.8.2.
+  unrelated. Ranges change only on the evidence rule in spec v7 §6.8.2.
 - Paste the records and the classification into `tests/fixtures/README.md`. A backend that was
   not available is recorded as skipped with the reason, and its README rows stay marked
   unverified; never describe a skipped check, or one `openai_compat` server, as verification.
+
+Live checks record acceptance and refusal only, never model behaviour: sampled output is not
+reproducible, so no release, table or README claim is decided from it (spec v7 §17, M21-3).
+
+**LM Studio probe (a diagnostic, not a test).** `tests/probe_lmstudio.py` sends one small set of
+requests per generation setting to LM Studio and prints what came back, with a plain summary and
+reading hints. It gives no verdicts, pytest does not run it, and nothing depends on its output.
+
+```bash
+python tests/probe_lmstudio.py --reasoning off 2>&1 | tee probe-off.txt   # native route
+python tests/probe_lmstudio.py --reasoning low 2>&1 | tee probe-low.txt   # Responses route
+```
+
+It uses the LM Studio live variables, or `--url` and `--model`; `--help` lists the options.
+`tests/test_probe_lmstudio.py` checks offline only what it sends and prints.
 
 **Fixtures.** `tests/fixtures/README.md` holds the capture procedure and the coverage table. All
 current fixtures are synthetic. When you capture a real response, check it for your key
@@ -173,11 +236,14 @@ backend or a fake one:
 
 The spec is the contract. A behaviour change updates, in the same change:
 
-1. `docs/modelspell_v1_spec_v6.md` (or a new spec version), including §14 if it deviates from NEL;
+1. `docs/modelspell_v1_spec_v7.md` (or a new spec version), including §14 if it deviates from NEL;
 2. the tests named in the spec for that behaviour;
 3. `README.md` where it documents the behaviour;
 4. `NEWS.md` under the next version;
 5. `docs/modelspell_design_history.md`, if the change records a design decision.
+
+A setting is sent on a route only if the route's documentation defines it, directly or through
+the reference that documentation points to for fields it does not list (spec v7 §7.2, M21-2).
 
 ## Branches and releases
 

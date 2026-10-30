@@ -1,11 +1,11 @@
-"""Request construction: R1–R9 (spec §12.3; R1, R2, R4, R5 extended in spec v6). R10–R16: test_settings.py."""
+"""Request construction: R1–R9 and R17 (spec §12.3). R10–R16: test_settings.py."""
 import json
 import pathlib
 
 import pytest
 
 from conftest import KEY, MSGS, canned, ep, route_of
-from modelspell import (AuthError, ConfigError, Endpoint, Message, UnsupportedSetting, complete)
+from modelspell import (AuthError, ConfigError, Endpoint, Message, ModelInfo, UnsupportedSetting, complete)
 
 GOLDEN = {k: v for k, v in json.loads((pathlib.Path(__file__).parent / "golden/requests.json").read_text()).items()
           if not k.startswith("_")}
@@ -191,3 +191,62 @@ def test_key_not_in_endpoint_repr():
     e = Endpoint(kind="openrouter", api_key=KEY)
     assert "***" in repr(e) and KEY not in repr(e)
     assert "api_key=None" in repr(Endpoint(kind="lmstudio"))
+
+
+def _info(options, id="m"):
+    return ModelInfo(id=id, name=None, context_length=None, loaded=None, supports_tools=None,
+                     supports_reasoning=None, reasoning_options=options, pricing=None, raw={})
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("options", [None, (), ("off", "on"), ("on",)])
+def test_r17ab_native_model_info(server, stream, options):
+    expected = run(server, "lmstudio", stream=stream, reasoning="off")["body"]
+    server.requests.clear()
+    complete(ep(server, "lmstudio"), _info(options), MSGS, reasoning="off", on_text=NOOP if stream else None)
+    if not options:
+        del expected["reasoning"]
+    assert len(server.requests) == 1
+    assert server.requests[0]["path"] == "/api/v1/chat"
+    assert server.requests[0]["body"] == expected
+    assert expected["model"] == "m" and expected["store"] is False
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_r17a_g3_model_info(server, stream):
+    g = GOLDEN["G3"]
+    server.reply(canned("native", stream))
+    complete(ep(server, "lmstudio"), _info(None), g["input"], on_text=NOOP if stream else None, **g["args"])
+    expected = dict(g["body"], stream=stream)
+    del expected["reasoning"]
+    assert len(server.requests) == 1 and server.requests[0]["body"] == expected
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_r17c_native_sampling_without_reasoning(server, stream):
+    server.reply(canned("native", stream))
+    complete(ep(server, "lmstudio"), _info(None), MSGS, reasoning="off", top_k=20, min_p=0.05,
+             repetition_penalty=1.1, on_text=NOOP if stream else None)
+    assert len(server.requests) == 1
+    assert server.requests[0]["body"] == dict(model="m", input="task", system_prompt="sys", store=False,
+                                             stream=stream, top_k=20, min_p=0.05, repeat_penalty=1.1)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("kind,reasoning", [("lmstudio", None), ("lmstudio", "low"),
+                                          ("openrouter", None), ("openai_compat", None)])
+def test_r17d_other_routes_unchanged(server, stream, kind, reasoning):
+    expected = run(server, kind, stream=stream, reasoning=reasoning)
+    server.requests.clear()
+    complete(ep(server, kind), _info(None), MSGS, reasoning=reasoning, on_text=NOOP if stream else None)
+    assert len(server.requests) == 1
+    assert server.requests[0]["path"] == expected["path"]
+    assert server.requests[0]["body"] == expected["body"]
+
+
+@pytest.mark.parametrize("model", [_info(None, ""), _info(None, 123), 123, None])
+def test_r17e_invalid_model(server, model):
+    with pytest.raises(ConfigError) as exc:
+        complete(ep(server, "lmstudio"), model, MSGS, reasoning="off")
+    assert str(exc.value) == "model must be a non-empty str or a ModelInfo with a non-empty id"
+    assert server.requests == []
