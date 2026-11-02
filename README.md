@@ -11,7 +11,7 @@ modelSpell is a **controlled adaptation** of the completion client in [NEL](http
 Install from a [GitHub release](https://github.com/alexchwong/modelSpell/releases). Each release attaches one wheel and gives its sha256 in the notes. In a downstream `pyproject.toml` or requirements file, pin it by URL and hash:
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.2.0/modelspell-0.2.0-py3-none-any.whl#sha256=<sha256 from the release notes>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.3.0/modelspell-0.3.0-py3-none-any.whl#sha256=<sha256 from the release notes>
 ```
 
 The wheel contains only the library; it has no dependencies and needs no build step. Releases are the supported install channel; installing from an arbitrary commit is unsupported. `modelspell.__version__` reports the installed version. Licensed under MIT (`LICENSE`).
@@ -23,14 +23,15 @@ Development, tests, the developer test UI and the release process are described 
 ```python
 from modelspell import (
     complete, list_models, list_providers, supported_settings, check_settings,
-    Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing,
+    Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing, CancelHandle,
     ModelSpellError, ConfigError, UnsupportedSetting, UnsupportedOperation,
     AuthError, ConnectError, RequestTimeout, BackendError, ResponseFormatError, Cancelled,
 )
 ```
 
 - `Endpoint(kind, base_url=None, api_key=None, api_key_env=None, headers=None)` — `kind` is `"lmstudio"`, `"openrouter"` or `"openai_compat"`. `base_url` is the OpenAI-compatible root **including `/v1`** (defaults: `http://localhost:1234/v1`, `https://openrouter.ai/api/v1`; required for `openai_compat`). OpenRouter's `api_key_env` defaults to `OPENROUTER_API_KEY`.
-- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `CancelHandle()` — pass it as `complete(..., cancel=handle)` and call `handle.cancel()` from any thread to end the call at any stage; see [Cancellation](#cancellation).
 - `supported_settings(kind, reasoning=None) -> frozenset[str]` and `check_settings(kind, *, reasoning=None, max_tokens=None, …, provider=None) -> None` — pure helpers for the generation settings; see below.
 - `list_models(endpoint, *, timeout=15.0) -> list[ModelInfo]` (all kinds) and `list_providers(endpoint, "author/slug", *, timeout=15.0) -> list[ProviderInfo]` (OpenRouter only). No caching.
 
@@ -174,7 +175,53 @@ Both raise `ConfigError` before sending; nothing else changes for calls that use
 
 **Streaming errors are errors.** Mid-stream error chunks/events raise `BackendError(status=200)`; a stream that ends without its completion marker raises `BackendError("stream ended before completion")`; a malformed `data:` line raises `ResponseFormatError` (one JSON object per `data:` line is the supported format). Responses and native streams stop reading at their terminal event.
 
-**Cancellation.** A callback may raise `Cancelled()`. modelSpell closes the HTTP response, attaches `exc.partial` (what arrived so far, `finish_reason="cancelled"`) and re-raises. Closing the connection locally is the only guarantee; whether the backend stops generating is up to the backend. Any other callback exception propagates unchanged after the response is closed.
+**Usage while streaming.** modelSpell reads token usage from wherever the route reports it and never estimates it; usage that was not reported is `None`. Nothing extra is sent to ask for it:
+- **OpenRouter** documents that it always includes full usage in every response, streamed or not, and that `stream_options.include_usage` is deprecated and has no effect. modelSpell reads it from the streamed chunk that carries it (in practice the final one) or from the response body.
+- **`openai_compat`** servers report streamed usage only if they send it unasked. If yours needs `stream_options`, pass `extra={"stream_options": {"include_usage": True}}`.
+- **LM Studio** reports usage in the Responses route's terminal event and in the native route's `chat.end` statistics; both are parsed.
+
+### Cancellation
+
+There are two ways to cancel a call:
+
+1. **From a callback**, by raising `Cancelled()` (unchanged since 0.1.0). Callbacks run only when text arrives, so this cannot stop a call that is still connecting, sending, or waiting for its first token.
+2. **From any thread, at any stage**, with a `CancelHandle` (from 0.3.0):
+
+```python
+import threading
+from modelspell import CancelHandle, Cancelled, Endpoint, complete
+
+handle = CancelHandle()
+threading.Timer(30, handle.cancel).start()           # or call handle.cancel() from a Stop button
+try:
+    result = complete(Endpoint(kind="lmstudio"), "qwen3.8-27b", long_prompt,
+                      cancel=handle, on_text=print)
+except Cancelled as exc:
+    print("stopped;", "the request may have been sent" if exc.sent else "nothing was sent",
+          "-", exc.partial.text)
+```
+
+`cancel()` returns at once and never blocks: modelSpell shuts down the call's socket, which wakes it wherever it is waiting. The call then raises `Cancelled`, normally within a few milliseconds:
+
+| Stage when you cancel | `Cancelled.sent` | `partial` |
+|---|---|---|
+| Before the call, or while resolving the host name (takes effect when resolution returns) | `False` | empty |
+| Connecting, proxy tunnel, TLS handshake | `False` | empty |
+| Writing the request, or waiting for response headers | `True` | empty |
+| Streaming | `True` | the text and reasoning delivered so far |
+| Reading a non-streamed body, or an HTTP error body | `True` | empty |
+| After the terminal event (or the whole body) was read | — the call returns its `Result` | — |
+
+- **`sent`.** `False` guarantees that no byte of the request was written, so the backend cannot have seen it (or charged for it). `True` means it **may** have been received; it is not proof of delivery. A `Cancelled` raised by your own callback has `sent=True`.
+- **`partial`** is a `Result` with what was delivered before cancellation took effect, `finish_reason="cancelled"`, and `usage`, `cost` and `raw_usage` always `None` (usage is never estimated).
+- **One ending.** Each call either returns its `Result` or raises one exception. A `cancel()` that arrives after the terminal event has been read has no effect on that call.
+- **Reuse and sharing.** A handle stays cancelled; a call given an already-cancelled handle raises `Cancelled(sent=False)` without connecting. One handle may be passed to several calls, in turn or at the same time; one `cancel()` ends them all. To start again, create a new handle.
+- **Callbacks.** Once cancellation takes effect, no further fragment is delivered. One callback that had already been admitted may still start or finish after `cancel()` returns, and `complete()` cannot return while a callback is running, so keep callbacks short.
+- **Precedence.** Errors that do not depend on timing (invalid arguments, a missing OpenRouter key) are raised even if the handle is already cancelled.
+- **Closing is local.** modelSpell closes its own connection; whether the backend stops generating, and stops charging, is up to the backend.
+- Any exception your callback raises other than `Cancelled` propagates unchanged after the response is closed. Discovery calls (`list_models`, `list_providers`) cannot be cancelled.
+
+**Verification status (0.3.0).** Cancellation at every stage and usage while streaming are verified offline on every route, over HTTP and HTTPS. On OpenRouter they are also verified live (owner checks, Full preset, 2 November 2026, `qwen/qwen3.8-27b` served by PrimeIntellect; all eight checks passed). That covers cancellation before sending with a fresh and a reused handle (`sent=False`, no request), before the first token on a long prompt, mid-stream and during a non-streamed body, each ending within 2 ms of `cancel()`; a late `cancel()` that leaves the `Result` unchanged; and usage reported unasked on streamed and non-streamed calls. It is one model and one provider. LM Studio (both routes) and llama-server are verified offline only for 0.3.0. The record is in `tests/fixtures/README.md`.
 
 ### Secrecy: guarantees and limits
 

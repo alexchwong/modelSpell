@@ -1,4 +1,4 @@
-"""Streaming: S1–S13 (spec §12.5)."""
+"""Streaming: S1–S14 (spec §12.5)."""
 import random
 import threading
 
@@ -6,7 +6,7 @@ import pytest
 
 from conftest import FIXTURES, Reply, ep, fx, json_reply, sse_reply
 from expected import EXPECTED, check
-from modelspell import BackendError, Cancelled, RequestTimeout, ResponseFormatError, complete
+from modelspell import BackendError, CancelHandle, Cancelled, RequestTimeout, ResponseFormatError, complete
 
 KIND = {"chat": None, "responses": "lmstudio", "native": "lmstudio"}
 SUCCESS = [("chat", "or_text_synthetic"), ("chat", "or_reasoning_synthetic"), ("chat", "or_reasoning_field_synthetic"),
@@ -212,3 +212,51 @@ def test_s13_terminal_event_ends_read(server, route, stem, incomplete):
 def test_s13_terminal_without_payload_keeps_reading(server, route, raw):
     out = _run_with_watchdog(lambda: stream(server, route, "x", timeout=1, reply=Reply(body=[raw], hold=True)))
     assert isinstance(out.get("error"), RequestTimeout)
+
+
+# --- S14: usage while streaming (spec v8 §8.4, AT-5) ----------------------------------------------
+
+def test_s14a_no_stream_options_anywhere(make_server):
+    import json, pathlib
+    golden = json.loads((pathlib.Path(__file__).parent / "golden/requests.json").read_text())
+    streamed = [g for k, g in golden.items() if not k.startswith("_") and g["stream"]]
+    assert streamed and all("stream_options" not in g["body"] for g in streamed)
+    for kind, route, reasoning in (("openrouter", "chat", None), ("openai_compat", "chat", None),
+                                   ("lmstudio", "responses", None), ("lmstudio", "native", "off")):
+        srv = make_server().reply(sse_reply(f"{route}/{dict(chat='or_text', responses='resp_text', native='native_text')[route]}_synthetic.sse"))
+        complete(ep(srv, kind), "m", "x", reasoning=reasoning, on_text=lambda s: None)
+        assert "stream_options" not in srv.requests[0]["body"], kind
+
+
+def test_s14b_usage_parsed_or_none(make_server):
+    r = stream(make_server(), "chat", "or_text_synthetic")[0]
+    assert r.usage is not None and r.usage.input_tokens == 12 and r.usage.output_tokens == 4
+    r = stream(make_server(), "chat", "compat_text_synthetic")[0]
+    assert r.usage is None
+
+
+def test_s14c_cancelled_after_usage_chunk_reports_no_usage(server):
+    usage = (b'data: {"choices":[{"delta":{"content":"z"}}],'
+             b'"usage":{"prompt_tokens":12,"completion_tokens":4,"total_tokens":16,"cost":0.1}}\n\n')
+    server.reply(Reply(body=events(fx("chat/or_text_synthetic.sse"))[:3] + [usage], hold=True))
+    h, got_usage_chunk, out = CancelHandle(), threading.Event(), {}
+
+    def on_text(s):
+        if s == "z":  # delivered from the usage chunk itself: the usage has been read
+            got_usage_chunk.set()
+
+    def run():
+        try:
+            complete(ep(server, "openrouter"), "m", "x", on_text=on_text, cancel=h, timeout=30)
+        except Cancelled as exc:
+            out["exc"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    assert got_usage_chunk.wait(30)
+    h.cancel()
+    t.join(5)
+    assert not t.is_alive()
+    exc = out["exc"]
+    assert exc.partial.usage is None and exc.partial.raw_usage is None and exc.partial.cost is None  # MS-8
+    assert exc.partial.text == "Héllo 🌍z"

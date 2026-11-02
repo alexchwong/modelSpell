@@ -89,6 +89,7 @@ def parse_stream(events, acc: Acc, call, *, kind, token_cap) -> object:
                 or "LM Studio native chat stream error"
         elif etype == "chat.end" and isinstance(doc.get("result"), dict):
             final = doc["result"]
+            acc.terminal()
             break  # deviation #18: stop at the terminal event
     if not saw_event:
         raise call.error(BackendError, "provider returned no SSE native chat events")

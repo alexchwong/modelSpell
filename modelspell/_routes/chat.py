@@ -89,6 +89,7 @@ def parse_stream(events, acc: Acc, call, *, kind, token_cap) -> object:
     for doc in events:
         if doc == "[DONE]":
             saw_done = True
+            acc.terminal()
             break
         saw_event = True
         if _is_error(doc):

@@ -1,7 +1,7 @@
 # modelSpell v1 — design history
 
-**Status:** Informative. This document records how the specification reached its current form. It is not part of the implementation contract; `modelspell_v1_spec_v7.md` is the only authoritative description of behaviour. Section and test references below use the current spec's numbering, which has not changed since spec v2 except by addition (v5 added §18 and K7; v6 added §6.7–§6.9, G10–G12, R10–R16, U6–U10 and V2; v7 added G13 and §19).
-**Date:** 20 October 2026; round 5 added 27 October 2026; round 6 added 28 October 2026
+**Status:** Informative. This document records how the specification reached its current form. It is not part of the implementation contract; `modelspell_v1_spec_v8.md` is the only authoritative description of behaviour. Section and test references below use the current spec's numbering, which has not changed since spec v2 except by addition (v5 added §18 and K7; v6 added §6.7–§6.9, G10–G12, R10–R16, U6–U10 and V2; v7 added G13 and §19; v8 added §6.10, §9.6, §12.10, §18.4, §20, S14, K4's shared-handle run and U11–U16).
+**Date:** 20 October 2026; round 5 added 27 October 2026; round 6 added 28 October 2026; round 7 added 2 November 2026
 
 ## Document lineage
 
@@ -15,7 +15,9 @@
 | *modelSpell 0.2.0 technical specification* v1–v3 | 27 October 2026 | *modelSpell 0.2.0 technical specification — review v1* (against v2) | Round 5; v3 implemented as package 0.2.0 and folded into spec v6 |
 | `modelspell_v1_spec_v6.md` | 27 October 2026 | — | Generation settings (package 0.2.0) |
 | *modelSpell 0.2.1 technical specification* v1–v6 | 28 October 2026 | *review v1* to *review v5*, each against the version before it; *review v3* was not seen by the author of v4 to v6; v4 was based on the implementer's in-conversation review of v3 | Round 6; v6 implemented as package 0.2.1 and folded into spec v7 |
-| `modelspell_v1_spec_v7.md` | 28 October 2026 | — | Current. `top_p` on LM Studio Responses (package 0.2.1) |
+| `modelspell_v1_spec_v7.md` | 28 October 2026 | — | `top_p` on LM Studio Responses (package 0.2.1) |
+| *modelSpell 0.3.0 technical specification* v1–v4 | 2 November 2026 | *review v1* to *review v3*, each against the version before it | Round 7; v4 implemented as package 0.3.0 and folded into spec v8 |
+| `modelspell_v1_spec_v8.md` | 2 November 2026 | — | Current. Cancellation through a `CancelHandle`, usage while streaming, owner checks (package 0.3.0) |
 
 ---
 
@@ -170,3 +172,25 @@ Alternatives rejected:
 - A new parameter: `ModelInfo` already carries the information.
 
 **Follow-up:** the developer UI still passes the model id string; changing it is outside this work.
+
+## Round 7 — cancellation and usage (spec v8, package 0.3.0)
+
+**Request.** *AgentWiz 0.1.x Release Plan and 0.2 Design*, version 11 (2 November 2026), Section 11: requirements MS-1 to MS-8 and MS-20, automated checks AT-1 to AT-8, owner checks OC-1 to OC-6, developer-UI items UI-1 to UI-3; directives D70–D73. AgentWiz 0.1.4 needs Stop and its time budget to end a model step at any stage, including while a local model is still reading a long prompt, which 0.2.1's callback-only cancellation cannot do.
+
+**Specification history.** The *modelSpell 0.3.0 technical specification* went through four versions on 2 November 2026, each after a review of the one before:
+
+- *Review v1* (against v1, R1–R8). Callback *admission* replaced the literal "no callback after cancellation" (a callback may already have been admitted; holding the lock across caller code would block `cancel()` and deadlock a callback that cancels); an aggregate run verdict so an incomplete pytest run cannot look passed; Stop and the watchdog moved into a tooling-only controller, because a `CancelHandle` has no notification API; the LM Studio route selector; the cost subtotal with an unknown-cost count; member-by-member wheel comparison for the candidate. Checking R5 found a real gap: a `cancel()` landing between registering a socket and the start of its blocking `connect()` is lost (`shutdown()` on a not-yet-connecting socket fails with `ENOTCONN` and leaves no trace). Version 2 made registration and a non-blocking connect one step under the handle's lock (M30-15).
+- *Review v2* (against v2, R1–R5). A one-button owner workflow (M30-21); a bounded `Battery.run()` with daemon threads and a discovery stage under the same Stop and watchdog rules; classification rules that do not fail races the public API permits (M30-20); release rules for live results (M30-17).
+- *Review v3* (against v3). Two corrections to the classification: a `Result` after an in-flight cancellation is `inconclusive` whatever its timing (the battery sees when `complete()` returns, not when it committed), and a `Result` ending allows at most one callback per channel after `cancel()` returned (the final-only fallback). The classification became one ordered procedure.
+
+**Decisions** M30-1 to M30-21 are listed in spec v8 §20.
+
+**Alternatives rejected** (spec 0.3.0 §5.2): replacing urllib with direct `http.client` calls (loses `ProxyHandler`); capturing `conn.sock` after `connect()` (misses connect and the TLS handshake, and `http.client` drops the socket for streamed responses); register-then-blocking-connect (the gap above); shutting down the TLS socket object from another thread (touches TLS state the reader may be using); `close()` from another thread (does not reliably wake a blocked thread on Linux and frees the descriptor number for reuse); polling the flag in every read; a watchdog thread per call; holding the lock while a callback runs.
+
+**MS-7 resolution.** OpenRouter documents that full usage is always included in every response and that `stream_options.include_usage` is deprecated and has no effect, and modelSpell already reads usage from the final streamed chunk. So 0.3.0 sends nothing new on any route (M30-8); `openai_compat` waits for 0.4.0. Spec v8 §17 (V3) says what contrary evidence would lead to. *Which row applied:* the first. The owner's Full run on OpenRouter (2 November 2026, `qwen/qwen3.8-27b`, served by PrimeIntellect) reported usage unasked on both streamed and non-streamed calls, so M30-8 stands and the specification's Appendix B is not applied. The record is in `tests/fixtures/README.md`.
+
+**Departures from plan v11** (spec 0.3.0 §2.3): V-3 runs as the usage rows of the owner's Full run instead of before fixing the interface; one handle may serve concurrent calls; the 1-second bound excludes time inside an admitted callback; MS-3 is worded as admission; AT-3's `sent` is "may have been sent" when `True`; AT-7's "fake that ignores cancellation" is a stand-in `complete()` (M30-14); Full sends 6 requests in 8 calls; the battery adds a route selector and an aggregate verdict.
+
+**Implementation notes (2 November 2026).** Built from `devel` at `e821465`. Departures from the specification's sketches, none behavioural: `_Watch.commit()` is idempotent once committed; the test server gained per-request hold events (`server.hold_event(i)`) so battery triggers cannot be set by an earlier request's hold under load; the connect-stage test (C1c) is ordered by a hook on `socket.socket.connect_ex` rather than a sleep; the battery records a check as stopped whenever its call ended after Stop cancelled its handle (a race found in stress runs). The README's install example and DEVEL's pin example were moved to v0.3.0.
+
+**Follow-ups:** live owner checks on LM Studio (both routes) and llama-server at the start of AgentWiz 0.2.0; a macOS CI job (until then AgentWiz's macOS CI is the evidence); plan v11's next revision absorbs the departures above; the developer UI's request panel still passes the model id as a string.

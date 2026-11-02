@@ -1,4 +1,9 @@
 # NEWS
+## 0.3.0
+- `complete()` accepts `cancel=CancelHandle()`; `cancel()` from any thread ends the call at any stage, including before the first token.
+- `Cancelled` gains `sent`: `False` means no part of the request was written before cancellation took effect.
+- Cancellation refuses new streamed fragments; an admitted callback may still run; a `cancel()` after the terminal event keeps the `Result`.
+
 ## 0.2.1
 - `complete()` accepts a `ModelInfo` from `list_models()`; then `reasoning="off"` works on LM Studio models without reasoning configuration.
 - `top_p` is now sent on LM Studio's Responses route (reasoning default, low, medium, high), as OpenAI's Responses reference defines.

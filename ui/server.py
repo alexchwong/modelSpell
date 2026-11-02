@@ -10,6 +10,11 @@ keyed by (kind, base_url) so a key is never sent to a different endpoint, and ne
 Connection settings (model source, base URL, key, model, OpenRouter provider) are held once per
 process. Generation settings are not stored here: the page sends them with each /api/complete
 request (spec v6 §18.3).
+
+Stop cancels the running request through a modelspell.CancelHandle (POST /api/complete/stop), so it
+acts at any stage, including before the first token. The owner checks (ui/owner_checks.py) run from
+POST /api/checks; at most one battery runs at a time, and its slot stays occupied until every
+worker thread has exited (spec v8 §18.3).
 """
 from __future__ import annotations
 
@@ -19,12 +24,15 @@ import json
 import pathlib
 import secrets
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import modelspell
-from modelspell import Cancelled, Endpoint, ModelSpellError
+from modelspell import CancelHandle, Cancelled, Endpoint, ModelSpellError
+
+from . import owner_checks
 
 INDEX = pathlib.Path(__file__).with_name("index.html")
 DEFAULT_SETTINGS = {"kind": "lmstudio", "base_url": "", "model": "", "provider": ""}
@@ -38,12 +46,21 @@ LEVELS = ("", "off", "low", "medium", "high")  # "" stands for None (backend def
 class UIServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port: int = 0):
+    def __init__(self, port: int = 0, battery_options: dict | None = None):
         super().__init__(("127.0.0.1", port), Handler)
         self.token = secrets.token_urlsafe(24)
         self.settings = dict(DEFAULT_SETTINGS)
         self.keys: dict[tuple[str, str], str] = {}
         self.index = INDEX.read_bytes()
+        self.lock = threading.Lock()
+        self.handles: dict[str, CancelHandle] = {}   # running /api/complete requests, by request ID
+        self.battery: owner_checks.Battery | None = None
+        self.battery_options = dict(battery_options or {})  # test-only: timing, triggers, complete stand-ins
+
+    def checks_running(self) -> bool:
+        """The owner-check slot is occupied until the battery has finished (every worker exited)."""
+        b = self.battery
+        return b is not None and not b.finished
 
     @property
     def url(self) -> str:
@@ -102,7 +119,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorised():
             return self._send(403, {"error": "missing or invalid session token"})
         routes = {"/api/config": self._config, "/api/models": self._models,
-                  "/api/providers": self._providers, "/api/complete": self._complete}
+                  "/api/providers": self._providers, "/api/complete": self._complete,
+                  "/api/complete/stop": self._complete_stop, "/api/checks": self._checks,
+                  "/api/checks/stop": self._checks_stop}
         handler = routes.get(urlparse(self.path).path)
         if handler is None:
             return self._send(404, {"error": "not found"})
@@ -121,7 +140,12 @@ class Handler(BaseHTTPRequestHandler):
         kind = s.settings["kind"]
         levels = ("",) if kind == "openai_compat" else LEVELS
         supported = {lv: sorted(modelspell.supported_settings(kind, lv or None)) for lv in levels}
-        return {**s.settings, "key_set": key_set, "supported": supported, "version": modelspell.__version__}
+        b = s.battery
+        running = s.checks_running()
+        return {**s.settings, "key_set": key_set, "supported": supported, "version": modelspell.__version__,
+                "presets": {name: owner_checks.preset_info(name) for name in owner_checks.PRESETS},
+                "default_preset": owner_checks.DEFAULT_PRESET, "checks_running": running,
+                "checks_stuck": bool(running and b is not None and b.ended)}
 
     def _config(self, body: dict):
         s = self.server
@@ -164,10 +188,23 @@ class Handler(BaseHTTPRequestHandler):
         kwargs = {k: v for k, v in settings.items() if v is not None and not (k == "reasoning" and v == "")}
         if s["provider"] and endpoint.kind == "openrouter":
             kwargs["provider"] = {"order": [s["provider"]], "allow_fallbacks": False}
+        handle, request_id = CancelHandle(), secrets.token_urlsafe(9)
+        with self.server.lock:
+            self.server.handles[request_id] = handle
+        try:
+            self._stream_complete(endpoint, s["model"], messages, kwargs, handle, request_id)
+        finally:
+            with self.server.lock:
+                self.server.handles.pop(request_id, None)
+
+    def _ndjson_start(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def _stream_complete(self, endpoint, model, messages, kwargs, handle, request_id):
+        self._ndjson_start()
         lock = threading.Lock()
 
         def emit(event: dict):
@@ -179,19 +216,84 @@ class Handler(BaseHTTPRequestHandler):
                 raise Cancelled("browser disconnected") from None  # closes the upstream request
 
         try:
-            result = modelspell.complete(endpoint, s["model"], messages,
+            emit({"type": "started", "id": request_id})
+            result = modelspell.complete(endpoint, model, messages,
                                          on_text=lambda t: emit({"type": "text", "text": t}),
                                          on_reasoning=lambda t: emit({"type": "reasoning", "text": t}),
-                                         **kwargs)
+                                         cancel=handle, **kwargs)
             # settings_sent: what was passed to complete() and sent, not a statement of what was applied
             emit({"type": "result", "result": _jsonable(result), "settings_sent": kwargs})
-        except Cancelled:
-            return
+        except Cancelled as exc:
+            if not handle.cancelled:
+                return  # the browser disconnected: nothing to tell it
+            try:
+                emit({"type": "cancelled", "sent": exc.sent, "partial": _jsonable(exc.partial)})
+            except Cancelled:
+                pass
         except ModelSpellError as exc:
             try:
                 emit({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
             except Cancelled:
                 pass
+
+    def _complete_stop(self, body: dict):
+        request_id = body.get("id")
+        if not isinstance(request_id, str) or not request_id:
+            return self._send(400, {"error": "id is required"})
+        with self.server.lock:
+            handle = self.server.handles.get(request_id)
+        if handle is None:
+            return self._send(200, {"already_finished": True})
+        handle.cancel()
+        self._send(200, {"stopping": True})
+
+    # --- owner checks (techspec 0.3.0 §10.2) ---------------------------------------------------
+
+    def _checks(self, body: dict):
+        srv = self.server
+        preset = body.get("preset") or owner_checks.DEFAULT_PRESET
+        route = body.get("route") or "default"
+        if preset not in owner_checks.PRESETS:
+            return self._send(400, {"error": f"unknown preset {preset!r}"})
+        if route not in owner_checks.ROUTES:
+            return self._send(400, {"error": f"unknown route {route!r}"})
+        endpoint = srv.endpoint({})
+        if route == "native" and endpoint.kind != "lmstudio":
+            return self._send(400, {"error": "the native route exists only for LM Studio"})
+        if not srv.settings["model"]:
+            return self._send(400, {"error": "choose a model in Model settings first"})
+        with srv.lock:
+            if srv.checks_running():
+                b = srv.battery
+                msg = ("a request from an earlier run is still shutting down; a new run can start once it has"
+                       if b is not None and b.ended else "owner checks are already running")
+                return self._send(409, {"error": msg})
+            battery = owner_checks.Battery(endpoint, srv.settings["model"], preset, route=route,
+                                           provider_pin=srv.settings["provider"] or None, **srv.battery_options)
+            srv.battery = battery
+            battery.start()
+        self._ndjson_start()
+        try:
+            while True:
+                ev = battery.next_event(1.0)
+                if ev is None:
+                    cur = battery.current
+                    if cur is None or battery.ended:
+                        continue
+                    ev = {"type": "progress", "check": cur["check"],
+                          "elapsed_s": round(time.monotonic() - cur["started"], 1)}
+                self.wfile.write(json.dumps(ev).encode() + b"\n")
+                self.wfile.flush()
+                if ev["type"] == "done":
+                    return
+        except OSError:
+            battery.stop()  # the browser went away: noticed at the next write, about once a second
+
+    def _checks_stop(self, body: dict):
+        b = self.server.battery
+        if b is None or not b.stop():
+            return self._send(200, {"already_finished": True})
+        self._send(200, {"stopping": True})
 
 
 def main(argv=None) -> None:

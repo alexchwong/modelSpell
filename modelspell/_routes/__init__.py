@@ -24,25 +24,47 @@ def id_or_none(value: Any) -> str | None:
 
 
 class Acc:
-    """Accumulates streamed text/reasoning and forwards non-empty fragments to callbacks."""
+    """Accumulates streamed text/reasoning and forwards non-empty fragments to callbacks.
 
-    def __init__(self, transport: str, on_text: Callable | None, on_reasoning: Callable | None):
+    With a watch, every fragment passes the admission point first (spec v8 §6.10): the watch's lock
+    is released before the fragment is added and its callback runs.
+    """
+
+    def __init__(self, transport: str, on_text: Callable | None, on_reasoning: Callable | None, watch=None):
         self.transport, self._on_text, self._on_reasoning = transport, on_text, on_reasoning
+        self._watch = watch
         self.text: list[str] = []
         self.reasoning: list[str] = []
         self.meta: dict[str, Any] = {}  # model, provider, response_id, raw_usage, finish_reason, ...
+        self.callback_error: BaseException | None = None  # the object a callback raised, if any
+
+    def _call(self, callback: Callable, s: str) -> None:
+        try:
+            callback(s)
+        except BaseException as exc:
+            self.callback_error = exc  # complete() tells a callback's exception from its own by identity
+            raise
 
     def add_text(self, s: str) -> None:
         if s:
+            if self._watch is not None:
+                self._watch.admit()
             self.text.append(s)
             if self._on_text:
-                self._on_text(s)
+                self._call(self._on_text, s)
 
     def add_reasoning(self, s: str) -> None:
         if s:
+            if self._watch is not None:
+                self._watch.admit()
             self.reasoning.append(s)
             if self._on_reasoning:
-                self._on_reasoning(s)
+                self._call(self._on_reasoning, s)
+
+    def terminal(self) -> None:
+        """The route read its terminal event: the streaming commit point."""
+        if self._watch is not None:
+            self._watch.commit()
 
     def result(self, **kw: Any) -> Result:
         fields = {**self.meta, **kw}

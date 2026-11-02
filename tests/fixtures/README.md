@@ -51,6 +51,7 @@ Check every captured file for the key before committing it. Add a row below with
 | discovery/openrouter_endpoints_synthetic.json | synthetic | `/endpoints`: `tag` with `/`, mixed-case `tag`, no `tag`, no name | no OpenRouter key |
 | discovery/lmstudio_models_synthetic.json | synthetic | loaded LLM, unloaded LLM, embedding | no LM Studio |
 | discovery/compat_models_synthetic.json | synthetic | generic `/models` (`id`/`slug`/string rows, duplicate) | no openai_compat server |
+| tls/localhost.{crt,key} | test certificate | self-signed, CN and SAN `localhost`, `127.0.0.1`, 100-year validity; HTTPS cancellation tests (C1, spec v8 §12.10); not a response fixture | — |
 
 ## Verification V1 (§17)
 
@@ -169,6 +170,69 @@ therefore stays **not verified**. The skipped rows below retain the original imp
 environment's status; this unsuccessful attempt does not replace them with verification.
 
 **Not run** (27 Oct 2026, package 0.2.0) — no LM Studio instance, no `OPENROUTER_API_KEY` and no llama-server were available in the implementation environment. Every backend is therefore **skipped**, every row of the support and range tables (spec v6 §6.7, §6.8.2) ships as documented, and the README marks them unverified. Nothing here may be described as verification until the checks below are run.
+
+## Usage while streaming (V3, spec v8 §17)
+
+**Recorded 2 November 2026** (00:32 UTC) from the usage rows of the owner's Full run on OpenRouter below: model `qwen/qwen3.8-27b`, no provider pin (served by `PrimeIntellect`), modelSpell 0.3.0, Python 3.13.13, Linux.
+
+- `stream_usage`: **pass**. The streamed request carried no `stream_options`, and usage arrived unasked: 62 input, 16 output (13 reasoning) tokens, cost $0.000004.
+- `nonstream_usage`: **pass**. 62 input, 16 output (15 reasoning) tokens, cost $0.000004.
+
+**V3 row applied:** the first, "streamed and non-streamed calls report usage unasked". As OpenRouter documents, so M30-8 stands: no request change, and Appendix B of the 0.3.0 technical specification is not applied.
+
+| Backend | Route | Status |
+|---|---|---|
+| OpenRouter | chat_completions | **verified live** 2 Nov 2026 (`qwen/qwen3.8-27b`, served by `PrimeIntellect`); usage reported unasked, streamed and non-streamed |
+| LM Studio | responses, lmstudio_native | blocked — backend unavailable until AgentWiz 0.2.0 (plan D72); verified offline only (S14, C1i) |
+| llama-server | chat_completions (`openai_compat`) | blocked — backend unavailable until AgentWiz 0.2.0 (plan D72) |
+
+## Owner checks (0.3.0)
+
+The battery is `ui/owner_checks.py` (spec v8 §18.4). Paste the copied record (Markdown table, `OC-CONFIG` and `OC` lines, verdict) here, one subsection per backend and run. A stage may be described as verified live in the README only if its check passed in the recorded run; inconclusive and blocked rows are acceptable and do not block the release.
+
+| Backend | Route | Preset | Verdict | Record |
+|---|---|---|---|---|
+| OpenRouter | default (chat_completions) | Full | **pass** (8 of 8), 2 Nov 2026 | below |
+| LM Studio | default (responses) | Full | blocked — backend unavailable until AgentWiz 0.2.0 (plan D72) | — |
+| LM Studio | native (lmstudio_native) | Full | blocked — backend unavailable until AgentWiz 0.2.0 (plan D72) | — |
+| llama-server | default (`openai_compat`) | Full | blocked — backend unavailable until AgentWiz 0.2.0 (plan D72) | — |
+
+### OpenRouter, Full, 2 November 2026
+
+Run from the developer UI (Phase H2), with model `qwen/qwen3.8-27b` and no provider pin. Every request was served by `PrimeIntellect`. The run used the default timings (first-token trigger 1.5 s, non-streaming trigger 2.0 s, bound 1.0 s, watchdog 90 s).
+
+| check | state | elapsed (s) | cancel→end (s) | sent | usage in/out | finish | cost | note |
+|---|---|---|---|---|---|---|---|---|
+| stream_usage | pass | 1.37 |  | True | 62/16 | length | 0.000004 |  |
+| nonstream_usage | pass | 1.13 |  | True | 62/16 | length | 0.000004 |  |
+| cancel_pre_send | pass | 0.00 | 0.001 | False |  | cancelled |  |  |
+| cancel_first_token | pass | 1.50 | 0.002 | True |  | cancelled |  |  |
+| cancel_mid_stream | pass | 1.25 | 0.001 | True |  | cancelled |  |  |
+| cancel_non_stream | pass | 2.00 | 0.001 | True |  | cancelled |  |  |
+| cancel_late | pass | 1.87 |  | True | 62/16 | length | 0.000004 |  |
+| cancel_reused | pass | 0.00 | 0.001 | False |  | cancelled |  |  |
+
+Verdict: pass · 8 of 8 passed · reported cost subtotal (incomplete) $0.000011 · unknown cost: 3
+
+```
+OC-CONFIG {"utc": "2026-11-02T00:32:27Z", "modelspell": "0.3.0", "python": "3.13.13", "platform": "linux", "kind": "openrouter", "route": "default", "transport": "chat_completions", "base_url": "https://openrouter.ai/api/v1", "model": "qwen/qwen3.8-27b", "model_arg": "id", "provider_pin": null, "preset": "Full", "timing": {"first_token_after": 1.5, "non_stream_after": 2.0, "bound": 1.0, "watchdog": 90.0, "cleanup": 5.0}, "timeout": 60.0, "padded_chars": 82847}
+OC {"check": "stream_usage", "state": "pass", "note": "", "elapsed_s": 1.368, "cancel_to_end_s": null, "sent": true, "callbacks_before_cancel": 16, "callbacks_after_cancel": 0, "input_tokens": 62, "output_tokens": 16, "reasoning_tokens": 13, "finish_reason": "length", "transport": "chat_completions", "cost": 3.768e-06, "served_by": "PrimeIntellect", "error": null, "status": null}
+OC {"check": "nonstream_usage", "state": "pass", "note": "", "elapsed_s": 1.131, "cancel_to_end_s": null, "sent": true, "callbacks_before_cancel": 0, "callbacks_after_cancel": 0, "input_tokens": 62, "output_tokens": 16, "reasoning_tokens": 15, "finish_reason": "length", "transport": "chat_completions", "cost": 3.768e-06, "served_by": "PrimeIntellect", "error": null, "status": null}
+OC {"check": "cancel_pre_send", "state": "pass", "note": "", "elapsed_s": 0.001, "cancel_to_end_s": 0.001, "sent": false, "callbacks_before_cancel": 0, "callbacks_after_cancel": 0, "input_tokens": null, "output_tokens": null, "reasoning_tokens": null, "finish_reason": "cancelled", "transport": "chat_completions", "cost": null, "served_by": null, "error": "Cancelled", "status": null}
+OC {"check": "cancel_first_token", "state": "pass", "note": "", "elapsed_s": 1.503, "cancel_to_end_s": 0.002, "sent": true, "callbacks_before_cancel": 0, "callbacks_after_cancel": 0, "input_tokens": null, "output_tokens": null, "reasoning_tokens": null, "finish_reason": "cancelled", "transport": "chat_completions", "cost": null, "served_by": null, "error": "Cancelled", "status": null}
+OC {"check": "cancel_mid_stream", "state": "pass", "note": "", "elapsed_s": 1.254, "cancel_to_end_s": 0.001, "sent": true, "callbacks_before_cancel": 7, "callbacks_after_cancel": 0, "input_tokens": null, "output_tokens": null, "reasoning_tokens": null, "finish_reason": "cancelled", "transport": "chat_completions", "cost": null, "served_by": null, "error": "Cancelled", "status": null}
+OC {"check": "cancel_non_stream", "state": "pass", "note": "", "elapsed_s": 2.002, "cancel_to_end_s": 0.001, "sent": true, "callbacks_before_cancel": 0, "callbacks_after_cancel": 0, "input_tokens": null, "output_tokens": null, "reasoning_tokens": null, "finish_reason": "cancelled", "transport": "chat_completions", "cost": null, "served_by": null, "error": "Cancelled", "status": null}
+OC {"check": "cancel_late", "state": "pass", "note": "", "elapsed_s": 1.871, "cancel_to_end_s": null, "sent": true, "callbacks_before_cancel": 16, "callbacks_after_cancel": 0, "input_tokens": 62, "output_tokens": 16, "reasoning_tokens": 17, "finish_reason": "length", "transport": "chat_completions", "cost": 3.768e-06, "served_by": "PrimeIntellect", "error": null, "status": null}
+OC {"check": "cancel_reused", "state": "pass", "note": "", "elapsed_s": 0.001, "cancel_to_end_s": 0.001, "sent": false, "callbacks_before_cancel": 0, "callbacks_after_cancel": 0, "input_tokens": null, "output_tokens": null, "reasoning_tokens": null, "finish_reason": "cancelled", "transport": "chat_completions", "cost": null, "served_by": null, "error": "Cancelled", "status": null}
+```
+
+**Reading the record.**
+
+- **Every stage the battery covers passed, so each may be described in the README as verified live on OpenRouter** (spec v8 §18.4). These are: before sending, with a fresh and a reused handle (`sent=False`, no request); before the first token on the padded prompt of about 83,000 characters (no callback, `sent=True`); mid-stream (seven fragments delivered, none after `cancel()`); during a non-streamed body; and a late `cancel()` that leaves the `Result` unchanged.
+- **cancel() to end** took 1–2 ms on every in-flight check, against the 1.0 s bound.
+- **Cost.** The reported subtotal of $0.000011 covers the three requests that returned a `Result`. The three in-flight cancellations were sent and report no cost, so the subtotal is incomplete (unknown cost: 3). The padded first-token request, in particular, may have been billed for its prompt.
+- **Token cap and reasoning counts.** The usage rows ended with `finish_reason: length`: the 16-token cap was reached while the model was reasoning. The check verifies that usage is reported, not what the answer says. The provider also reported more reasoning tokens than output tokens in `cancel_late` (17 against 16). That is the provider's own count, passed through unchanged.
+- **Scope.** This covers one model and one provider on OpenRouter. LM Studio (both routes) and llama-server remain verified offline only until AgentWiz 0.2.0.
 
 ## Probe observations (informal)
 

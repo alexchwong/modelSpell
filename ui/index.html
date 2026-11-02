@@ -40,6 +40,17 @@
   #advanced > summary { cursor:pointer; color:var(--muted); font-size:13px; }
   .note { color:var(--muted); font-size:12px; }
   #stop_seqs { min-height:0; }
+  #oc { border:1px solid var(--line); border-radius:8px; padding:4px 12px 8px; margin-top:16px; }
+  #oc > summary { cursor:pointer; font-weight:600; padding:4px 0; }
+  #oc-other > summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  #oc-other .inline { max-width:420px; margin-top:6px; }
+  #oc-table { width:100%; border-collapse:collapse; margin-top:8px; font-size:13px; }
+  #oc-table th, #oc-table td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  #oc-table td details pre { max-height:30vh; font-size:12px; }
+  #oc-table td summary { cursor:pointer; font-family:ui-monospace, monospace; }
+  .st-pass { color:#1e8e3e; } .st-fail { color:var(--err); } .st-inconclusive, .st-blocked, .st-not_applicable { color:var(--muted); }
+  #oc-status { font-family:ui-monospace, monospace; font-size:12px; color:var(--muted); }
+  #oc-copy-fallback { min-height:6em; margin-top:8px; }
 </style>
 </head>
 <body>
@@ -96,6 +107,32 @@
 </div>
 <details><summary>Result (JSON, with settings sent)</summary><pre id="result"></pre></details>
 
+<details id="oc">
+  <summary>Owner checks</summary>
+  <p class="note" id="oc-guard"></p>
+  <div class="row">
+    <button id="oc-run" class="primary">Run owner checks</button>
+    <button id="oc-stop" disabled>Stop</button>
+    <button id="oc-copy" disabled>Copy record</button>
+    <span id="oc-status"></span>
+  </div>
+  <details id="oc-other">
+    <summary>Other presets</summary>
+    <div class="inline">
+      <select id="oc-preset">
+        <option value="Full" selected>Full (default)</option><option value="Quick">Quick</option>
+        <option value="Cancellation">Cancellation</option><option value="Usage">Usage</option>
+      </select>
+      <select id="oc-route" title="LM Studio route">
+        <option value="default" selected>Responses route</option><option value="native">native route</option>
+      </select>
+    </div>
+  </details>
+  <table id="oc-table"><thead><tr><th>check</th><th>state</th><th>note</th></tr></thead><tbody></tbody></table>
+  <p class="note" id="oc-summary"></p>
+  <textarea id="oc-copy-fallback" class="hidden" readonly></textarea>
+</details>
+
 <dialog id="settings">
   <form method="dialog" id="settings-form">
     <label for="kind">Model source</label>
@@ -130,7 +167,7 @@
 const TOKEN = new URLSearchParams(location.search).get("t") || "";
 const $ = (id) => document.getElementById(id);
 const DEFAULT_URL = { lmstudio: "http://localhost:1234/v1", openrouter: "https://openrouter.ai/api/v1", openai_compat: "required" };
-let state = {}, clearKey = false, controller = null;
+let state = {}, clearKey = false, controller = null, requestId = null;
 // Generation settings (spec v6 §18.3): per tab, per request, never saved.
 const NUMERIC = ["temperature", "max_tokens", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty",
                  "frequency_penalty", "seed"];
@@ -263,7 +300,7 @@ $("load-providers").onclick = async () => {
 };
 
 $("save").onclick = async () => {
-  try { state = await api("/api/config", dialogConfig()); renderState(); refreshFields(); $("settings").close(); }
+  try { state = await api("/api/config", dialogConfig()); renderState(); refreshFields(); renderGuard(); $("settings").close(); }
   catch (e) { settingsMsg(e.message); }
 };
 
@@ -288,7 +325,12 @@ async function send() {
       let nl;
       while ((nl = buffer.indexOf("\n")) >= 0) {
         const ev = JSON.parse(buffer.slice(0, nl)); buffer = buffer.slice(nl + 1);
-        if (ev.type === "reasoning") { $("reasoning").textContent += ev.text; setStatus("streaming…"); }
+        if (ev.type === "started") { requestId = ev.id; }
+        else if (ev.type === "cancelled") {
+          setStatus(ev.sent ? "stopped — the request may have been sent; the backend may keep generating"
+                            : "stopped — request not sent");
+        }
+        else if (ev.type === "reasoning") { $("reasoning").textContent += ev.text; setStatus("streaming…"); }
         else if (ev.type === "text") { $("output").textContent += ev.text; setStatus("streaming…"); }
         else if (ev.type === "result") {
           const res = ev.result, u = res.usage || {};
@@ -296,21 +338,153 @@ async function send() {
             JSON.stringify(ev.settings_sent || {}, null, 2) + "\n\nResult\n" + JSON.stringify(res, null, 2);
           setStatus([`${((performance.now() - started) / 1000).toFixed(1)}s`, res.transport,
             `finish=${res.finish_reason}`, res.truncated ? "TRUNCATED" : null,
-            `in=${u.input_tokens ?? "?"} out=${u.output_tokens ?? "?"}` + (u.reasoning_tokens != null ? ` reasoning=${u.reasoning_tokens}` : ""),
+            res.usage == null ? "usage not reported" :
+              `in=${u.input_tokens ?? "?"} out=${u.output_tokens ?? "?"}` + (u.reasoning_tokens != null ? ` reasoning=${u.reasoning_tokens}` : ""),
             res.cost != null ? `$${res.cost.toFixed(6)}` : null, res.provider].filter(Boolean).join(" · "), res.truncated);
         } else if (ev.type === "error") setStatus(ev.error, true);
       }
     }
   } catch (e) {
-    setStatus(e.name === "AbortError" ? "stopped (the backend stops when its next token arrives)" : e.message, e.name !== "AbortError");
-  } finally { $("send").disabled = false; $("stop").disabled = true; controller = null; }
+    setStatus(e.name === "AbortError" ? "stopped (the connection was closed)" : e.message, e.name !== "AbortError");
+  } finally { $("send").disabled = false; $("stop").disabled = true; controller = null; requestId = null; }
 }
 
 $("send").onclick = send;
-$("stop").onclick = () => { if (controller) { controller.abort(); setStatus("stopping…"); } };
+// Stop cancels through the server's CancelHandle, so it acts before the first token too; the stream
+// then ends with a "cancelled" event. If the stop request itself fails, close the connection instead.
+$("stop").onclick = async () => {
+  if (!controller) return;
+  setStatus("stopping…");
+  if (requestId) {
+    try { await api("/api/complete/stop", { id: requestId }); return; } catch (e) { /* fall through */ }
+  }
+  controller.abort();
+};
 $("prompt").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send(); });
 
-api("/api/state").then((s) => { state = s; renderState(); refreshFields(); }).catch((e) => setStatus(e.message, true));
+// --- owner checks (one button, one copy) ------------------------------------------------------
+let ocRecord = null, ocPlan = null, ocCost = 0, ocCostKnown = false, ocRunning = false;
+function ocStatus(text) { $("oc-status").textContent = text; }
+function ocPreset() { return $("oc-preset").value || "Full"; }
+function ocRoute() { return state.kind === "lmstudio" ? $("oc-route").value : "default"; }
+
+function renderGuard() {
+  $("oc-route").classList.toggle("hidden", state.kind !== "lmstudio");
+  const p = (state.presets || {})[ocPreset()];
+  if (!p) { $("oc-guard").textContent = ""; return; }
+  const native = ocRoute() === "native";
+  const caps = [...new Set(Object.values(p.max_tokens))].join("/");
+  const parts = [`${state.kind} · ${native ? "native route" : "default route"} · ${state.model || "(no model)"}`
+    + (state.kind === "openrouter" ? ` · provider ${state.provider || "any"}` : ""),
+    `${ocPreset()}: ${p.calls} checks, ${p.requests} completion requests` + (native ? " + 1 discovery request" : ""),
+    `max_tokens ${caps}`];
+  if (p.padded_chars) parts.push(`padded prompt ${p.padded_chars.toLocaleString()} characters (≈${p.padded_tokens_approx.toLocaleString()} tokens)`);
+  parts.push("cancelled requests may have been sent and billed");
+  $("oc-guard").textContent = parts.join(" · ");
+}
+
+function ocAddRow(rec) {
+  const tr = document.createElement("tr");
+  const d = document.createElement("details"), sm = document.createElement("summary"), pre = document.createElement("pre");
+  sm.textContent = rec.check; pre.textContent = JSON.stringify(rec, null, 2); d.append(sm, pre);
+  const td1 = document.createElement("td"); td1.append(d);
+  const td2 = document.createElement("td"); td2.textContent = rec.state; td2.className = "st-" + rec.state;
+  const td3 = document.createElement("td"); td3.textContent = rec.note || "";
+  tr.append(td1, td2, td3); $("oc-table").tBodies[0].append(tr);
+  if (rec.cost != null) { ocCost += rec.cost; ocCostKnown = true; }
+}
+
+function ocCostText() { return ocCostKnown ? ` · reported cost subtotal $${ocCost.toFixed(6)}` : ""; }
+
+async function waitForSlot() {
+  // The run thread exits a moment after "done"; only a worker that outlives that is worth a message.
+  const before = $("oc-status").textContent;
+  let waited = 0, shown = false;
+  for (;;) {
+    try { const s = await api("/api/state"); if (!s.checks_running) break; } catch (e) { break; }
+    if (waited >= 1500 && !shown) {
+      ocStatus("Checks ended; a request is still shutting down. A new run can start once it has.");
+      shown = true;
+    }
+    await new Promise((r) => setTimeout(r, waited < 1500 ? 250 : 1000));
+    waited += waited < 1500 ? 250 : 1000;
+  }
+  if (shown) ocStatus(before);
+  $("oc-run").disabled = false;
+}
+
+async function runChecks() {
+  if (ocRunning) return;
+  ocRunning = true; ocRecord = null; ocPlan = null; ocCost = 0; ocCostKnown = false;
+  $("oc-table").tBodies[0].innerHTML = ""; $("oc-summary").textContent = "";
+  $("oc-copy-fallback").classList.add("hidden");
+  $("oc-run").disabled = true; $("oc-stop").disabled = false; $("oc-copy").disabled = true;
+  ocStatus("Starting…");
+  let done = null;
+  try {
+    const r = await fetch("/api/checks", { method: "POST",
+      headers: { "X-Session-Token": TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ preset: ocPreset(), route: ocRoute() }) });
+    if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+    const reader = r.body.getReader(), decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done: eof } = await reader.read();
+      if (eof) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const ev = JSON.parse(buffer.slice(0, nl)); buffer = buffer.slice(nl + 1);
+        if (ev.type === "plan") { ocPlan = ev; ocStatus(`Running ${ev.preset}…`); }
+        else if (ev.type === "stage") ocStatus("Preparing (finding the model)…");
+        else if (ev.type === "progress") {
+          if (ev.check === "preparation") ocStatus(`Preparing (finding the model)… (${ev.elapsed_s.toFixed(1)} s)`);
+          else {
+            const i = ocPlan ? ocPlan.checks.indexOf(ev.check) + 1 : 0, n = ocPlan ? ocPlan.checks.length : 0;
+            if ($("oc-status").textContent !== "Stopping…")
+              ocStatus(`Running check ${i} of ${n}: ${ev.check} (${ev.elapsed_s.toFixed(1)} s)` + ocCostText());
+          }
+        }
+        else if (ev.type === "check") ocAddRow(ev.record);
+        else if (ev.type === "done") done = ev;
+      }
+    }
+  } catch (e) { ocStatus(e.message); }
+  ocRunning = false; $("oc-stop").disabled = true;
+  if (done) {
+    ocRecord = done.record_markdown + "\n" + done.record_jsonl;
+    $("oc-copy").disabled = false;
+    const s = done.summary;
+    $("oc-summary").textContent = done.record_markdown.trim().split("\n").pop();
+    ocStatus(done.stopped ? "Stopped" : `Done: ${s.passed} of ${s.total} passed (${done.verdict})`);
+    await waitForSlot();
+    return;
+  }
+  $("oc-run").disabled = false;
+}
+
+$("oc-run").onclick = runChecks;
+$("oc-stop").onclick = async () => {
+  ocStatus("Stopping…");
+  try { await api("/api/checks/stop", {}); } catch (e) { ocStatus(e.message); }
+};
+$("oc-copy").onclick = async () => {
+  if (!ocRecord) return;
+  try { await navigator.clipboard.writeText(ocRecord); ocStatus($("oc-status").textContent.replace(/ · copied$/, "") + " · copied"); }
+  catch (e) {
+    const ta = $("oc-copy-fallback"); ta.value = ocRecord; ta.classList.remove("hidden"); ta.focus(); ta.select();
+    ocStatus("Select the text below and press Ctrl+C (Cmd+C on a Mac).");
+  }
+};
+$("oc-preset").onchange = renderGuard;
+$("oc-route").onchange = renderGuard;
+
+function afterState() {
+  renderState(); refreshFields(); renderGuard();
+  if (state.checks_running && !ocRunning) { $("oc-run").disabled = true; waitForSlot(); }
+}
+
+api("/api/state").then((s) => { state = s; afterState(); }).catch((e) => setStatus(e.message, true));
 </script>
 </body>
 </html>

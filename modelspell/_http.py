@@ -1,13 +1,19 @@
 """HTTP transport: per-call no-redirect opener, error mapping, redaction (spec §9)."""
 from __future__ import annotations
 
+import errno
+import functools
 import http.client
 import json
+import os
+import selectors
+import socket
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from ._cancel import _Watch
 from .errors import (AuthError, BackendError, ConnectError, ModelSpellError,
                      RequestTimeout, ResponseFormatError)
 
@@ -42,14 +48,106 @@ class Call:
         return cls(self.redact(message), **kw)
 
 
-def _request(call: Call, headers: dict[str, str], data: bytes | None, extra_headers) -> Any:
+# --- the watched transport (spec v8 §9.6) ----------------------------------------------------------
+_IN_PROGRESS = {errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EAGAIN, getattr(errno, "WSAEWOULDBLOCK", -1)}
+
+
+def _watched_connection(watch: _Watch, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """socket.create_connection, with each attempt registered and initiated atomically (M30-15)."""
+    host, port = address
+    wait = None if timeout is socket._GLOBAL_DEFAULT_TIMEOUT else timeout
+    err: OSError | None = None
+    for af, socktype, proto, _, sa in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        sock = socket.socket(af, socktype, proto)
+        dup = None
+        try:
+            if source_address:
+                sock.bind(source_address)
+            dup, code = watch.start_connect(sock, sa)   # _Stop if cancelled: nothing initiated
+            if code in _IN_PROGRESS:
+                with selectors.DefaultSelector() as sel:  # not select.select: no FD_SETSIZE limit
+                    sel.register(sock, selectors.EVENT_WRITE)
+                    if not sel.select(wait):
+                        raise TimeoutError("timed out")
+                code = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if code:
+                raise OSError(code, os.strerror(code))
+            sock.settimeout(wait)                       # back to blocking-with-timeout, as before
+            return sock
+        except OSError as exc:
+            err = exc
+            if dup is not None:
+                watch.release(dup)
+            sock.close()
+        except BaseException:
+            if dup is not None:
+                watch.release(dup)
+            sock.close()
+            raise
+    raise err if err is not None else OSError("getaddrinfo returned no addresses")
+
+
+class _WatchedConnectionMixin:
+    def __init__(self, *args, watch: _Watch, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._watch = watch
+        self._create_connection = functools.partial(_watched_connection, watch)
+
+    def connect(self):
+        self._watch.in_connect = True  # proxy tunnel CONNECT bytes are not the request
+        try:
+            super().connect()
+        finally:
+            self._watch.in_connect = False
+
+    def send(self, data):
+        if self.sock is None and self.auto_open:
+            self.connect()  # http.client connects inside send(); connect first so `sent` is exact
+        if not self._watch.in_connect and not self._watch.sent:
+            self._watch.begin_send()
+        return super().send(data)
+
+
+class _WatchedHTTPConnection(_WatchedConnectionMixin, http.client.HTTPConnection):
+    pass
+
+
+class _WatchedHTTPSConnection(_WatchedConnectionMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _WatchedHandlerMixin:
+    def __init__(self, watch: _Watch):
+        super().__init__()
+        self._watch = watch
+
+    def do_open(self, http_class, req, **kwargs):
+        cls = (_WatchedHTTPSConnection if issubclass(http_class, http.client.HTTPSConnection)
+               else _WatchedHTTPConnection)
+        return super().do_open(functools.partial(cls, watch=self._watch), req, **kwargs)
+
+
+class _WatchedHTTPHandler(_WatchedHandlerMixin, urllib.request.HTTPHandler):
+    pass
+
+
+class _WatchedHTTPSHandler(_WatchedHandlerMixin, urllib.request.HTTPSHandler):
+    pass
+
+
+def _request(call: Call, headers: dict[str, str], data: bytes | None, extra_headers,
+             watch: _Watch | None = None) -> Any:
     hdrs = dict(headers)
     if call.key:
         hdrs["Authorization"] = f"Bearer {call.key}"
     hdrs.update(extra_headers or {})
     req = urllib.request.Request(call.url, data=data, headers=hdrs,
                                  method="POST" if data is not None else "GET")
-    opener = urllib.request.build_opener(_NoRedirectHandler())  # includes ProxyHandler
+    if watch is None:  # discovery (MS-6): 0.2.1's opener
+        opener = urllib.request.build_opener(_NoRedirectHandler())  # includes ProxyHandler
+    else:  # build_opener omits its default HTTP(S) handlers when subclasses are given
+        opener = urllib.request.build_opener(_NoRedirectHandler(), _WatchedHTTPHandler(watch),
+                                             _WatchedHTTPSHandler(watch))
     try:
         return opener.open(req, timeout=call.timeout)
     except urllib.error.HTTPError as exc:
@@ -87,18 +185,21 @@ def _http_error(call: Call, exc: urllib.error.HTTPError) -> ModelSpellError:
                       f"{call.redact(body)[:1000]}", status=code, body=body)
 
 
-def post(call: Call, body: dict, extra_headers) -> Any:
+def post(call: Call, body: dict, extra_headers, watch: _Watch | None = None) -> Any:
     return _request(call, {"Content-Type": "application/json"},
-                    json.dumps(body).encode("utf-8"), extra_headers)
+                    json.dumps(body).encode("utf-8"), extra_headers, watch)
 
 
-def read_json(call: Call, response, dict_only: bool = True) -> Any:
+def read_json(call: Call, response, dict_only: bool = True, watch: _Watch | None = None) -> Any:
     try:
-        text = response.read().decode("utf-8", errors="replace")
+        raw = response.read()
     except TimeoutError:
         raise call.error(RequestTimeout, f"request timed out after {call.timeout}s at {call.url}") from None
     except (OSError, http.client.HTTPException) as exc:
         raise call.error(BackendError, f"response read failed for {call.model!r}: {exc}") from None
+    if watch is not None:
+        watch.commit()  # the whole body read: the non-streaming commit point
+    text = raw.decode("utf-8", errors="replace")
     try:
         document = json.loads(text)
     except ValueError:
