@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal, Mapping, Sequence
 
 from . import _http
+from ._cancel import CancelHandle, _Stop, _Watch
 from ._routes import Acc, chat, lmstudio_native, responses
 from ._sse import iter_sse
 from ._types import KINDS, Endpoint, Message, ModelInfo, Result
-from .errors import AuthError, Cancelled, ConfigError, UnsupportedSetting
+from .errors import AuthError, Cancelled, ConfigError, ModelSpellError, UnsupportedSetting
 
 _REASONING = ("off", "low", "medium", "high")
 _MODEL_RULE = "model must be a non-empty str or a ModelInfo with a non-empty id"
@@ -195,7 +196,8 @@ def _model_arg(model: Any) -> tuple[str, ModelInfo | None]:
     return model, None
 
 
-def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, callbacks) -> tuple[_Route, str, ModelInfo | None]:
+def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, callbacks,
+              cancel=None) -> tuple[_Route, str, ModelInfo | None]:
     if not isinstance(endpoint, Endpoint):
         raise ConfigError("endpoint must be an Endpoint")
     model_id, info = _model_arg(model)
@@ -206,7 +208,16 @@ def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, ca
         raise ConfigError("timeout must be a number > 0")
     if any(cb is not None and not callable(cb) for cb in callbacks):
         raise ConfigError("on_text and on_reasoning must be None or callable")
+    if cancel is not None and not isinstance(cancel, CancelHandle):
+        raise ConfigError("cancel must be None or a CancelHandle")
     return route, model_id, info
+
+
+def _cancelled(call: _http.Call, acc: Acc, watch: _Watch) -> Cancelled:
+    """The Cancelled for a cancellation through the handle (spec v8 §6.10)."""
+    exc = call.error(Cancelled, "cancelled" if watch.sent else "cancelled before sending")
+    exc.partial, exc.sent = acc.partial(), watch.sent
+    return exc
 
 
 def complete(
@@ -230,11 +241,13 @@ def complete(
     timeout: float = 900.0,
     on_text: Callable[[str], None] | None = None,
     on_reasoning: Callable[[str], None] | None = None,
+    cancel: CancelHandle | None = None,
 ) -> Result:
     settings = dict(max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
                     repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
                     frequency_penalty=frequency_penalty, seed=seed, stop=stop)
-    route, model_id, info = _validate(endpoint, model, reasoning, settings, provider, extra, timeout, (on_text, on_reasoning))
+    route, model_id, info = _validate(endpoint, model, reasoning, settings, provider, extra, timeout,
+                                      (on_text, on_reasoning), cancel)
     messages = _messages(input)
     key = endpoint._resolve_key()
     if endpoint.kind == "openrouter" and not key:
@@ -261,14 +274,28 @@ def complete(
     cap = cap if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1 else None
 
     call = _http.Call(url=url, key=key, timeout=timeout, model=model_id, route=route.hint)
-    response = _http.post(call, body, endpoint.headers)
-    acc = Acc(route.module.TRANSPORT, on_text, on_reasoning)
+    # spec v8 §6.10, §9.6: every completion goes through the watched transport (M30-9). Without a
+    # handle the watch can never be cancelled. Pre-send errors above take precedence (M30-7).
+    watch = _Watch(cancel)
+    acc = Acc(route.module.TRANSPORT, on_text, on_reasoning, watch)
     try:
-        if not streaming:
-            return route.module.parse_response(_http.read_json(call, response), call, kind=endpoint.kind, token_cap=cap)
-        return route.module.parse_stream(iter_sse(call, response), acc, call, kind=endpoint.kind, token_cap=cap)
+        with watch:  # raises _Stop at once if the handle is already cancelled
+            response = _http.post(call, body, endpoint.headers, watch)
+            try:
+                if not streaming:
+                    return route.module.parse_response(_http.read_json(call, response, watch=watch), call,
+                                                       kind=endpoint.kind, token_cap=cap)
+                return route.module.parse_stream(iter_sse(call, response, watch), acc, call,
+                                                 kind=endpoint.kind, token_cap=cap)
+            finally:
+                response.close()
     except Cancelled as exc:
-        exc.partial = acc.partial()
+        if exc is acc.callback_error:  # raised by a callback (MS-5): a response had arrived
+            exc.partial, exc.sent = acc.partial(), True
         raise
-    finally:
-        response.close()
+    except _Stop:
+        raise _cancelled(call, acc, watch) from None
+    except ModelSpellError as exc:
+        if exc is not acc.callback_error and watch.cancelled_before_commit():
+            raise _cancelled(call, acc, watch) from None
+        raise

@@ -1,4 +1,4 @@
-"""Packaging and concurrency: K1–K6 (spec §12.8; K1 updated in spec v6)."""
+"""Packaging and concurrency: K1–K6 (spec §12.8; K1 updated in spec v8)."""
 import dataclasses
 import importlib.util
 import pathlib
@@ -11,7 +11,7 @@ import pytest
 
 import modelspell
 
-from modelspell import (Endpoint, Message, ModelInfo, Pricing, ProviderInfo, Result, Usage, complete)
+from modelspell import (CancelHandle, Endpoint, Message, ModelInfo, Pricing, ProviderInfo, Result, Usage, complete)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIELDS = {
@@ -33,7 +33,7 @@ def test_k1_public_api():
     assert modelspell.__all__ == [
         "complete", "list_models", "list_providers", "supported_settings", "check_settings",
         "Endpoint", "Message", "Result", "Usage", "ModelInfo", "ProviderInfo", "Pricing",
-        "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",
+        "CancelHandle", "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",
         "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError", "Cancelled"]
     for cls, names in FIELDS.items():
         assert [f.name for f in dataclasses.fields(cls)] == names
@@ -94,8 +94,11 @@ def test_k4_concurrency(make_server):
     endpoint = Endpoint(kind="openai_compat", base_url=f"http://127.0.0.1:{httpd.server_address[1]}/v1")
     results = {}
 
+    shared = CancelHandle()  # spec v8 §12.8: also with one shared handle that is never cancelled
+
     def worker(i):
         results[i] = complete(endpoint, "m", f"prompt-{i}").text
+        results[100 + i] = complete(endpoint, "m", f"prompt-{i}", cancel=shared).text
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
     for t in threads:
@@ -104,7 +107,8 @@ def test_k4_concurrency(make_server):
         t.join(30)
     httpd.shutdown()
     httpd.server_close()
-    assert results == {i: f"prompt-{i}" for i in range(16)}
+    assert results == {**{i: f"prompt-{i}" for i in range(16)}, **{100 + i: f"prompt-{i}" for i in range(16)}}
+    assert shared._watches == set() and not shared.cancelled
 
 
 def test_k5_stdlib_only_and_no_urlopen():

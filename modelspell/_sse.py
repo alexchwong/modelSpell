@@ -5,17 +5,24 @@ import http.client
 import json
 from typing import Iterator
 
+from ._cancel import _Watch
 from ._http import Call
 from .errors import BackendError, RequestTimeout, ResponseFormatError
 
 
-def iter_sse(call: Call, response) -> Iterator[dict | str]:
-    """Yield "[DONE]" or one JSON object per `data:` line. Malformed data raises."""
+def iter_sse(call: Call, response, watch: _Watch | None = None) -> Iterator[dict | str]:
+    """Yield "[DONE]" or one JSON object per `data:` line. Malformed data raises.
+
+    End of input commits the call (spec v8 §6.10) when a watch is given; if cancellation took
+    effect first, the commit raises instead and complete() reports Cancelled.
+    """
     lines = iter(response)
     while True:
         try:
             raw_line = next(lines)
         except StopIteration:
+            if watch is not None:
+                watch.commit()
             return
         except TimeoutError:
             raise call.error(RequestTimeout, f"request timed out after {call.timeout}s at {call.url}") from None

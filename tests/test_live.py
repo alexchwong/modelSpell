@@ -2,7 +2,8 @@
 
 LM Studio:    MODELSPELL_LIVE_LMSTUDIO_URL, MODELSPELL_LIVE_LMSTUDIO_MODEL
 OpenRouter:   OPENROUTER_API_KEY, MODELSPELL_LIVE_OPENROUTER_MODEL, MODELSPELL_LIVE_OPENROUTER_PROVIDER (optional)
-llama-server: MODELSPELL_LIVE_LLAMASERVER_URL (including /v1), MODELSPELL_LIVE_LLAMASERVER_MODEL  (V2 only)
+llama-server: MODELSPELL_LIVE_LLAMASERVER_URL (including /v1), MODELSPELL_LIVE_LLAMASERVER_MODEL  (V2, owner checks)
+Owner checks: MODELSPELL_LIVE_PRESET (Quick, Cancellation, Usage, Full; default Full). Run with -s to see the record.
 Each call is checked on its own; live results are never compared with each other.
 """
 import json
@@ -232,3 +233,43 @@ def test_live_v2_llamaserver_openai_compat():
     _v2_extra(e, LLS_MODEL, [("repetition_penalty", 1.1), ("repeat_penalty", 1.1)], **meta)
     _v2_require_acceptance(records)
     _v2_fail_on_refusals(records)
+
+
+# --- owner checks (techspec 0.3.0 §9.7): the developer's route to the UI's battery ----------------
+#
+# Each test prints the full record, then acts on the run verdict: fail -> the test fails;
+# incomplete (inconclusive, blocked or stopped rows) -> skipped with the reason; pass -> passes.
+# Battery.run() is bounded, so a stuck call becomes a fail row, never a hung test.
+
+PRESET = os.environ.get("MODELSPELL_LIVE_PRESET", "Full")
+
+
+def _owner_checks(battery):
+    from ui.owner_checks import pytest_outcome
+    record = battery.run()
+    print("\n" + record.markdown() + record.jsonl())
+    action, reason = pytest_outcome(record)
+    if action == "fail":
+        pytest.fail(reason)
+    if action == "skip":
+        pytest.skip(reason)
+
+
+@need_or
+def test_live_owner_checks_openrouter():
+    from ui.owner_checks import Battery
+    _owner_checks(Battery(Endpoint(kind="openrouter"), OR_MODEL, PRESET, provider_pin=OR_PROVIDER))
+
+
+@need_lms
+@pytest.mark.parametrize("route", ["default", "native"])
+def test_live_owner_checks_lmstudio(route, lms_info):
+    from ui.owner_checks import Battery
+    model = lms_info if route == "native" else LMS_MODEL  # native: a ModelInfo, so no discovery request
+    _owner_checks(Battery(Endpoint(kind="lmstudio", base_url=LMS_URL), model, PRESET, route=route))
+
+
+@need_lls
+def test_live_owner_checks_llamaserver():
+    from ui.owner_checks import Battery
+    _owner_checks(Battery(Endpoint(kind="openai_compat", base_url=LLS_URL), LLS_MODEL, PRESET))

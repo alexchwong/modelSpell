@@ -44,6 +44,14 @@ class ResponseFormatError(BackendError):
 
 
 class Cancelled(ModelSpellError):
+    """The call was cancelled: by a callback raising it, or through a CancelHandle (spec v8 §9.1).
+
+    partial: the Result accumulated before cancellation took effect. sent: False guarantees that no
+    byte of the request was written; True means it may have been. Both are None until modelSpell
+    has handled the exception.
+    """
+
     def __init__(self, message: str | None = None):
         super().__init__(*([message] if message is not None else []))
         self.partial = None
+        self.sent = None

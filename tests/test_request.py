@@ -5,7 +5,7 @@ import pathlib
 import pytest
 
 from conftest import KEY, MSGS, canned, ep, route_of
-from modelspell import (AuthError, ConfigError, Endpoint, Message, ModelInfo, UnsupportedSetting, complete)
+from modelspell import (AuthError, CancelHandle, ConfigError, Endpoint, Message, ModelInfo, UnsupportedSetting, complete)
 
 GOLDEN = {k: v for k, v in json.loads((pathlib.Path(__file__).parent / "golden/requests.json").read_text()).items()
           if not k.startswith("_")}
@@ -23,10 +23,12 @@ def run(server, kind, *, stream=False, input=MSGS, endpoint=None, **args):
     return server.requests[-1]
 
 
+@pytest.mark.parametrize("handle", [False, True], ids=["no-handle", "handle"])
 @pytest.mark.parametrize("name", sorted(GOLDEN))
-def test_r1_golden(server, name):
+def test_r1_golden(server, name, handle):
     g = GOLDEN[name]
-    req = run(server, g["kind"], stream=g["stream"], input=g.get("input", MSGS), **g["args"])
+    extra = {"cancel": CancelHandle()} if handle else {}  # spec v8 §12.3: identical bodies with a handle
+    req = run(server, g["kind"], stream=g["stream"], input=g.get("input", MSGS), **g["args"], **extra)
     assert req["method"] == "POST" and req["path"] == g["path"]
     assert req["body"] == {k: _sub(v) for k, v in g["body"].items()}
 

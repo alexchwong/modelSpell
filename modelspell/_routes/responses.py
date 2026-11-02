@@ -114,6 +114,7 @@ def parse_stream(events, acc: Acc, call, *, kind, token_cap) -> object:
                 raw_usage = nested["usage"]
             if etype in _TERMINAL:
                 final = nested
+                acc.terminal()
                 break  # deviation #18: stop at the terminal event
     if not saw_event:
         raise call.error(BackendError, "provider returned no SSE response events")

@@ -1,7 +1,7 @@
 # Developer guide
 
 This file is for repository maintenance. Library usage is documented in `README.md`; the
-behavioural contract is `docs/modelspell_v1_spec_v7.md`; agent operating rules are in
+behavioural contract is `docs/modelspell_v1_spec_v8.md`; agent operating rules are in
 `.clinerules`. Nothing in this guide, `.clinerules`, `tests/`, `ui/`, `scripts/`, `examples/`
 or `docs/` ships in the release wheel.
 
@@ -24,6 +24,7 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 - [Repository layout](#repository-layout)
 - [Library invariants](#library-invariants)
 - [Tests](#tests)
+- [Owner checks](#owner-checks)
 - [Developer test UI](#developer-test-ui)
 - [Changing behaviour](#changing-behaviour)
 - [Branches and releases](#branches-and-releases)
@@ -36,12 +37,12 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 | `modelspell/` | yes | The library. Import name `modelspell`; distribution name `modelSpell`. |
 | `modelspell/_version.py` | yes | Single source of the version (`__version__ = "X.Y.Z"`). |
 | `pyproject.toml`, `README.md`, `LICENSE` | metadata | Packaging, wheel description, MIT license. |
-| `tests/` | no | Offline suite, fixtures, golden request bodies, opt-in live suite, and the LM Studio probe diagnostic (`tests/probe_lmstudio.py`). |
-| `ui/` | no | Developer test UI (`python -m ui`). |
+| `tests/` | no | Offline suite, fixtures (including the test TLS certificate in `tests/fixtures/tls/`), golden request bodies, opt-in live suite, and the LM Studio probe diagnostic (`tests/probe_lmstudio.py`). |
+| `ui/` | no | Developer test UI (`python -m ui`) and the owner-check battery (`ui/owner_checks.py`). |
 | `scripts/build_release.py` | no | Builds and verifies the release wheel. |
 | `scripts/smoke_installed.py` | no | Smoke test run against an installed wheel (K3, `--smoke`). |
 | `examples/basic.py` | no | Usage example against a local LM Studio. |
-| `docs/` | no | Spec v7 (authoritative), specs v5 and v6 (superseded, kept as history) and design history (informative). |
+| `docs/` | no | Spec v8 (authoritative), specs v6 and v7 (superseded, kept as history) and design history (informative). |
 | `.clinerules` | no | Agent operating rules; process detail lives in this guide. |
 | `.gitattributes` | no | Line-ending policy (`* text=auto eol=lf`). |
 | `.github/workflows/` | no | `tests.yml` (push, PR) and `release.yml` (push to `main`). |
@@ -62,6 +63,9 @@ Changes under `modelspell/` must keep these; tests enforce most of them.
 - **One HTTP request per `complete()` call.** No retries, no route or streaming fallback, no
   redirect following; requests go through the per-call `_NoRedirectHandler` opener, never
   `urlopen` (§6.3, §9.5).
+- **Every completion request goes through the watched opener**, whose connections register and
+  initiate each connection attempt atomically (spec v8 §9.6); discovery uses the plain one. A
+  `CancelHandle` never holds its lock while caller code runs.
 - **Every exception the package raises is built through `Call.error()` in `_http.py`**, which
   redacts the key before truncating. Low-level failures are raised `from None` (§9.3, E5).
 - **The public API is exactly `modelspell.__all__`** (K1). Field changes to public dataclasses
@@ -97,7 +101,21 @@ python -m pytest -m live -s             # live checks; see below
 ```
 
 Test IDs (R1, P7, S13, …) match the spec's §12 tables; keep them in test names or comments when
-adding cases.
+adding cases. Cancellation is C1–C9 (`tests/test_cancel.py`, spec v8 §12.10), usage while
+streaming S14, the owner-check battery O1–O7 (`tests/test_owner_checks.py`) and the UI's Stop and
+owner-check routes U11–U16.
+
+**Cancellation tests** order stages with hooks, never sleeps: events the fake sets when it reaches
+a stage (`server.reached`, `server.hold_event(i)`), and events set by patched standard-library
+functions (`socket.getaddrinfo`, `socket.socket.connect_ex`, `http.client.HTTPConnection.send`).
+The `held_connect` fixture skips (never passes) on a platform that cannot hold a TCP connect.
+HTTPS cases use the self-signed certificate in `tests/fixtures/tls/`, trusted through
+`SSL_CERT_FILE`. It is test-only; regenerate it in that folder with
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -keyout localhost.key -out localhost.crt -days 36500 \
+  -subj /CN=localhost -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+```
 
 **Live checks** (`tests/test_live.py`) run only when their variables are set, and each call is
 checked on its own:
@@ -106,7 +124,8 @@ checked on its own:
 |---|---|
 | LM Studio | `MODELSPELL_LIVE_LMSTUDIO_URL` (e.g. `http://localhost:1234/v1`), `MODELSPELL_LIVE_LMSTUDIO_MODEL` |
 | OpenRouter | `OPENROUTER_API_KEY`, `MODELSPELL_LIVE_OPENROUTER_MODEL` (`author/slug`); optional `MODELSPELL_LIVE_OPENROUTER_PROVIDER` (provider slug from `list_providers`; default: first listed provider with a slug) |
-| llama-server (V2 only, as `openai_compat`) | `MODELSPELL_LIVE_LLAMASERVER_URL` (including `/v1`), `MODELSPELL_LIVE_LLAMASERVER_MODEL` |
+| llama-server (V2 and owner checks, as `openai_compat`) | `MODELSPELL_LIVE_LLAMASERVER_URL` (including `/v1`), `MODELSPELL_LIVE_LLAMASERVER_MODEL` |
+| Owner checks | `MODELSPELL_LIVE_PRESET` (`Quick`, `Cancellation`, `Usage`, `Full`; default `Full`) |
 
 The LM Studio model may have reasoning configuration or none: native tests pass its `ModelInfo`
 from a module-scoped discovery fixture; Responses tests retain the string id. Native V2 records carry
@@ -122,7 +141,7 @@ Run verification V1 with
 `python -m pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip`
 and record the printed evidence in `tests/fixtures/README.md`.
 
-**Verification V2** (spec v7 §17) checks the generation-settings tables against real servers
+**Verification V2** (spec v8 §17) checks the generation-settings tables against real servers
 before a release that changes them. Run `python -m pytest -m live -s -k v2`. Each call prints one
 `V2 {...}` JSON line with backend, version, route, model, provider, setting, value and outcome.
 
@@ -149,13 +168,13 @@ probes on all routes, including provider forwarding and printed evidence. Run th
 - A refused *supported* setting fails the test. Classify it before release as a route limitation
   (same refusal across models/providers, or documented: move the setting to "—" for that route),
   a model or provider limitation (record it; the README lists it; the table does not change), or
-  unrelated. Ranges change only on the evidence rule in spec v7 §6.8.2.
+  unrelated. Ranges change only on the evidence rule in spec v8 §6.8.2.
 - Paste the records and the classification into `tests/fixtures/README.md`. A backend that was
   not available is recorded as skipped with the reason, and its README rows stay marked
   unverified; never describe a skipped check, or one `openai_compat` server, as verification.
 
 Live checks record acceptance and refusal only, never model behaviour: sampled output is not
-reproducible, so no release, table or README claim is decided from it (spec v7 §17, M21-3).
+reproducible, so no release, table or README claim is decided from it (spec v8 §17, M21-3).
 
 **LM Studio probe (a diagnostic, not a test).** `tests/probe_lmstudio.py` sends one small set of
 requests per generation setting to LM Studio and prints what came back, with a plain summary and
@@ -172,6 +191,45 @@ It uses the LM Studio live variables, or `--url` and `--model`; `--help` lists t
 **Fixtures.** `tests/fixtures/README.md` holds the capture procedure and the coverage table. All
 current fixtures are synthetic. When you capture a real response, check it for your key
 (`grep -cF "$OPENROUTER_API_KEY" <file>` must print 0) and add a row with backend, version and date.
+
+## Owner checks
+
+The owner checks are a fixed battery of live checks in `ui/owner_checks.py`, built only on
+modelSpell's public API. The developer UI and `pytest -m live` run the same code. Prompts, token
+caps and timings are constants, so records compare across runs.
+
+| Preset | Checks | Calls | Requests |
+|---|---|---|---|
+| Quick | `stream_usage`, `cancel_first_token`, `cancel_mid_stream` | 3 | 3 |
+| Cancellation | `cancel_pre_send`, `cancel_first_token`, `cancel_mid_stream`, `cancel_non_stream`, `cancel_late`, `cancel_reused` | 6 | 4 |
+| Usage | `stream_usage`, `nonstream_usage` | 2 | 2 |
+| Full (default) | all eight, each once | 8 | 6 |
+
+- **Route selector.** `default` sends `reasoning=None` (LM Studio: Responses). `native` (LM Studio
+  only) sends `reasoning="off"` and passes a `ModelInfo`: the caller's, or one found by a single
+  `list_models()` call in a preparation stage (one extra request, shown in the guard).
+- **Row states** are `pass`, `fail`, `not_applicable`, `inconclusive` and `blocked`; only `pass`
+  counts as passed. Auth, connection, 402, 404, 429 and 5xx failures are `blocked`; an auth or
+  connection failure ends the run. Live cancellation rows are classified by what the public API can
+  prove: a `Result` after an in-flight `cancel()` is `inconclusive` (the call may have committed
+  first) unless two or more callbacks on one channel started after `cancel()` returned.
+- **Run verdict:** `fail` if any row fails; `pass` only if every applicable row passes and the run
+  was neither stopped nor stuck; otherwise `incomplete`.
+- **Running.** In the UI: choose the backend and model in Model settings, click **Run owner
+  checks**, then **Copy record**. From pytest: `python -m pytest -m live -s -k owner_checks`, with
+  the live variables above and `MODELSPELL_LIVE_PRESET`. pytest prints the record, fails on `fail`,
+  skips an `incomplete` run with the rows that did not pass, and passes only on `pass`. A stuck call
+  becomes a `fail` row with `cleanup_pending`, never a hung test.
+- **Cost.** The record shows a *reported cost subtotal* (the sum of `Result.cost` where reported)
+  and an *unknown cost* count: requests that were sent or may have been sent and reported no cost
+  (every `Cancelled` with `sent=True`). Nothing is estimated; with any unknown-cost request the
+  subtotal is labelled incomplete.
+- **Recording.** Paste the copied record into `tests/fixtures/README.md` under "Owner checks", one
+  row per backend, with unavailable backends recorded as blocked and the reason. The README may say
+  a stage is "verified live" only if the check covering it passed in the recorded run.
+- Classifying a `fail` row (modelSpell defect, battery defect, backend limitation) is the
+  implementer's job, not part of the routine run. A conclusive `fail` attributable to modelSpell or
+  the battery blocks the release until resolved; inconclusive and blocked rows never do.
 
 ## Developer test UI
 
@@ -215,14 +273,30 @@ under *Advanced* (collapsed, with a count such as "Advanced (3 set, 1 not sent)"
   panel). `/api/complete` refuses a `settings` value that is not an object, or has an unknown key,
   with HTTP 400 before streaming.
 
-**Stop limitation.** Stop closes the browser request; the server notices on its next write, i.e.
-when the next token arrives, and then cancels the upstream call. It cannot interrupt prompt
-processing before the first token, because v1 cancellation exists only inside callbacks (§8.10).
+**Stop.** The page's Stop posts the request's ID (from the stream's first event,
+`{"type": "started", "id": ...}`) to `POST /api/complete/stop`, which cancels that request's
+`CancelHandle`. It acts at any stage, including prompt processing before the first token; the
+stream then ends with one `{"type": "cancelled", "sent": ..., "partial": ...}` event and the status
+line says "stopped — request not sent" or "stopped — the request may have been sent; the backend
+may keep generating". If the stop request itself fails, the page closes the connection, which the
+server notices at its next write (as before). The status line says "usage not reported" when a
+result carries no usage.
 
-`tests/test_ui.py` covers the HTTP contract (U1–U10: token, key handling, event stream, discovery,
-disconnect → cancel, per-request settings, `supported`, refusals, zero values). The HTML/JS is not
-tested automatically. After changing the page, run this manual check list once, against a real
-backend or a fake one:
+**Owner checks section.** One button, **Run owner checks**, runs the Full preset against the
+model settings above; **Copy record** copies the record. Other presets are under "Other presets",
+and for LM Studio a route selector (Responses or native). `POST /api/checks` streams `plan`,
+`stage` (preparation, native route only), one `check` per finished check, and `done`; while a check
+runs, the handler writes a `progress` event about once a second, and a failed write of any event
+stops the battery, so a closed browser is noticed within about a second. `POST /api/checks/stop`
+stops the run. The server holds one battery; its slot stays occupied (409 for a new run) until every
+worker thread has exited, which can be later than `done` when a call is stuck. `/api/state`
+reports `presets`, `default_preset`, `checks_running` and `checks_stuck`.
+
+`tests/test_ui.py` covers the HTTP contract (U1–U16: token, key handling, event stream, discovery,
+disconnect → cancel, per-request settings, `supported`, refusals, zero values, Stop through the
+handle, the owner-check routes, Stop, presets and the stuck slot). The HTML/JS is not tested
+automatically. After changing the page, run this manual check list once, against a real backend
+or a fake one:
 
 1. On LM Studio, switch reasoning between off and low, and watch the advanced fields enable and
    disable.
@@ -231,19 +305,28 @@ backend or a fake one:
 4. Enter `1e400` as temperature, and see the page refuse it without sending.
 5. Enter temperature 3 on OpenRouter, and see modelSpell's `ConfigError`.
 6. Reset, and see every field blank.
+7. Against a backend held before its first token (a large prompt on a local model, or the fake),
+   Stop shows "stopped — the request may have been sent" within a second.
+8. Open "Owner checks": Full is selected; read the guard; click **Run owner checks** against the
+   fake; watch the status and table fill; Copy record and paste it somewhere. Then choose Quick
+   under "Other presets", run it, and reload: the selector is back on Full.
+9. Against a backend that reports no usage (the `openai_compat` fake), the status line says
+   "usage not reported".
+10. Close the tab during a run; reopen the page: `checks_running` is false within a few seconds,
+    and a new run starts.
 
 ## Changing behaviour
 
 The spec is the contract. A behaviour change updates, in the same change:
 
-1. `docs/modelspell_v1_spec_v7.md` (or a new spec version), including §14 if it deviates from NEL;
+1. `docs/modelspell_v1_spec_v8.md` (or a new spec version), including §14 if it deviates from NEL;
 2. the tests named in the spec for that behaviour;
 3. `README.md` where it documents the behaviour;
 4. `NEWS.md` under the next version;
 5. `docs/modelspell_design_history.md`, if the change records a design decision.
 
 A setting is sent on a route only if the route's documentation defines it, directly or through
-the reference that documentation points to for fields it does not list (spec v7 §7.2, M21-2).
+the reference that documentation points to for fields it does not list (spec v8 §7.2, M21-2).
 
 ## Branches and releases
 
@@ -264,15 +347,27 @@ both and on pull requests (Python 3.10 and 3.13).
 
 1. On `devel`, bump `modelspell/_version.py`.
 2. Add `## X.Y.Z` to `NEWS.md` (the build fails without it).
-3. Commit, then run `python scripts/build_release.py --smoke` locally. It builds from the
+3. Run the owner checks' Full preset on every available backend and paste the record into
+   `tests/fixtures/README.md`; record unavailable backends as blocked; claim live verification in
+   the README only for checks that passed. Do this before step 4: `README.md` is in the wheel.
+4. Commit, then run `python scripts/build_release.py --smoke` locally. It builds from the
    committed `HEAD`; uncommitted edits are excluded and reported.
-4. Merge `devel` into `main`.
-5. Check the release page: wheel attached, notes correct, install line works in a fresh venv.
+5. Merge `devel` into `main`.
+6. Check the release page: wheel attached, notes correct, install line works in a fresh venv.
+
+**A release co-developed with a downstream project** (such as AgentWiz): the wheel from step 4,
+built from the committed `devel` HEAD, is the *release candidate*. Do not merge to `main` until the
+downstream project has retested against it, and keep the shipped files unchanged meanwhile. A
+defect found downstream means a fix on `devel` and a new candidate. After the release, compare the
+released wheel with the candidate: equal sha256, or every member byte-identical after unpacking
+(including `METADATA`, `WHEEL` and `RECORD`), means it is the tested candidate; any differing member
+makes it a new candidate that the downstream project retests before pinning. Never edit a
+published release; fix on `devel` and release a patch version.
 
 Downstream projects should depend on the release wheel by URL and hash, e.g.
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.2.0/modelspell-0.2.0-py3-none-any.whl#sha256=<sha256>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.3.0/modelspell-0.3.0-py3-none-any.whl#sha256=<sha256>
 ```
 
 Releases are the supported install channel. Installing from an arbitrary commit
