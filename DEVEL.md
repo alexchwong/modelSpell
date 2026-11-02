@@ -331,7 +331,22 @@ the reference that documentation points to for fields it does not list (spec v8 
 ## Branches and releases
 
 Work happens on `devel`. `main` only receives merges from `devel`. `tests.yml` runs on pushes to
-both and on pull requests (Python 3.10 and 3.13).
+both and on pull requests, and exposes `workflow_call` for the release workflow. Its four-job
+matrix runs Python 3.10 and 3.13 on `ubuntu-latest`, Python 3.10 on `macos-15-intel`, and
+Python 3.13 on `macos-15` (Apple Silicon). Current `actions/python-versions` builds of Python
+3.10 are available for Intel macOS, not ARM64; the split covers both Mac architectures without
+pinning an old interpreter patch. Explicit macOS image labels make OS-image migrations deliberate.
+
+Each job has a 20-minute timeout, creates `.venv` with the selected Python, installs
+`-e '.[dev]'` using `.venv/bin/python -m pip`, and runs `.venv/bin/python -m pytest`.
+Skip reasons remain visible (`-rs` in the pytest configuration). In particular, a skipped
+`held_connect` fixture means connect-stage cancellation was not verified on that runner;
+do not treat it as a pass or add blanket macOS skips. Live checks skip without credentials.
+
+Each job also runs `.venv/bin/python scripts/build_release.py --smoke` as a required step.
+This verifies the committed wheel and its clean-venv installation even if the suite's K3/K7
+test skips because wheel building is unavailable; build failures fail the job instead.
+The release workflow waits for all four test jobs, so macOS failures block publication too.
 
 `release.yml` runs on every push to `main` (and manually). It reruns the tests, then:
 
