@@ -1,6 +1,6 @@
 # modelSpell v1 — design history
 
-**Status:** Informative. This document records how the specification reached its current form. It is not part of the implementation contract; `modelspell_v1_spec_v8.md` is the only authoritative description of behaviour. Section and test references below use the current spec's numbering, which has not changed since spec v2 except by addition (v5 added §18 and K7; v6 added §6.7–§6.9, G10–G12, R10–R16, U6–U10 and V2; v7 added G13 and §19; v8 added §6.10, §9.6, §12.10, §18.4, §20, S14, K4's shared-handle run and U11–U16).
+**Status:** Informative. This document records how the specification reached its current form. It is not part of the implementation contract; `modelspell_v1_spec_v9.md` is the only authoritative description of behaviour. Section and test references below use the current spec's numbering, which has not changed since spec v2 except by addition (v5 added §18 and K7; v6 added §6.7–§6.9, G10–G12, R10–R16, U6–U10 and V2; v7 added G13 and §19; v8 added §6.10, §9.6, §12.10, §18.4, §20, S14, K4's shared-handle run and U11–U16; v9 added §6.11, §12.11, §12.12, §21, §22, T1–T11, L1–L13 and VT).
 **Date:** 20 October 2026; round 5 added 27 October 2026; round 6 added 28 October 2026; round 7 added 2 November 2026
 
 ## Document lineage
@@ -17,7 +17,9 @@
 | *modelSpell 0.2.1 technical specification* v1–v6 | 28 October 2026 | *review v1* to *review v5*, each against the version before it; *review v3* was not seen by the author of v4 to v6; v4 was based on the implementer's in-conversation review of v3 | Round 6; v6 implemented as package 0.2.1 and folded into spec v7 |
 | `modelspell_v1_spec_v7.md` | 28 October 2026 | — | `top_p` on LM Studio Responses (package 0.2.1) |
 | *modelSpell 0.3.0 technical specification* v1–v4 | 2 November 2026 | *review v1* to *review v3*, each against the version before it | Round 7; v4 implemented as package 0.3.0 and folded into spec v8 |
-| `modelspell_v1_spec_v8.md` | 2 November 2026 | — | Current. Cancellation through a `CancelHandle`, usage while streaming, owner checks (package 0.3.0) |
+| `modelspell_v1_spec_v8.md` | 2 November 2026 | — | Superseded by v9. Cancellation through a `CancelHandle`, usage while streaming, owner checks (package 0.3.0) |
+| *modelSpell 0.4.0 proposal* v1–v4 | 10–11 November 2026 | reviews of v1, v2 and v3, each against the version before it | Round 8; v4 implemented as package 0.4.0 and folded into spec v9 |
+| `modelspell_v1_spec_v9.md` | 11 November 2026 | — | Current. Client-executed function calling and opt-in HTTP 429 recovery (package 0.4.0) |
 
 ---
 
@@ -194,3 +196,55 @@ Alternatives rejected:
 **Implementation notes (2 November 2026).** Built from `devel` at `e821465`. Departures from the specification's sketches, none behavioural: `_Watch.commit()` is idempotent once committed; the test server gained per-request hold events (`server.hold_event(i)`) so battery triggers cannot be set by an earlier request's hold under load; the connect-stage test (C1c) is ordered by a hook on `socket.socket.connect_ex` rather than a sleep; the battery records a check as stopped whenever its call ended after Stop cancelled its handle (a race found in stress runs). The README's install example and DEVEL's pin example were moved to v0.3.0.
 
 **Follow-ups:** live owner checks on LM Studio (both routes) and llama-server at the start of AgentWiz 0.2.0; a macOS CI job (until then AgentWiz's macOS CI is the evidence); plan v11's next revision absorbs the departures above; the developer UI's request panel still passes the model id as a string.
+
+## Round 8 — tool calling and HTTP 429 recovery (spec v9, package 0.4.0)
+
+**Request.** *modelSpell 0.4.0 proposal*, version 4 (11 November 2026), superseding v3 after its
+review. AgentWiz 0.2.3 needs a public API for client-executed function calling to build its bounded
+adaptive loop from the released wheel alone (AgentWiz Plan v15.1 §4, §10, §11; Plan v14 §15–16,
+R7-9). The scriptSpell smoke report of 10 November recorded a shared upstream 429 via Parasail,
+which motivated the separate, opt-in 429 track. Structured answer generation stays a separate
+AgentWiz decision (MS-21).
+
+**Decisions** M40-1 to M40-11 are listed in spec v9 §22.
+
+**Implementation notes (11 November 2026).** Built from `devel` at `0e0138c`. Choices the proposal
+left open, none of which changes the contract it states:
+
+- *Separate entry point.* `Message`, `Result` and `complete()` keep their 0.3.0 field contracts
+  (the §15 path of making `Message.content` optional was not needed).
+- *Seal, not registry.* Replay eligibility is a private seal object on each parser-built
+  `ToolTurn`, not a registry of issued turns, which would be module-level mutable state (§2).
+  `object.__new__(ToolTurn)` yields an unsealed object that replay refuses.
+- *Frozen JSON values.* `ToolDefinition.parameters`, `ToolTurn.replay` and `route_identity` are
+  `FrozenMap`s and tuples (`modelspell/_json.py`). They compare equal to the equivalent plain
+  dicts and lists, so callers can inspect them naturally; identity comparison uses a separate typed
+  key (`canon`) so `true`, `1` and `1.0` stay distinct, as the proposal requires.
+- *Exact numbers.* Tool bodies are encoded by `_json.dumps`, byte-identical to `json.dumps` for
+  ordinary values and exact for `Decimal` (its decimal string, always a valid JSON number when
+  finite). Ordinary requests keep `json.dumps`, so the goldens are unchanged.
+- *Terminal classification.* The proposal requires "an explicit `finish_reason` and, when
+  streaming, `[DONE]`" and says contradictions and missing terminal information are typed errors.
+  Implemented as: missing `finish_reason`, `finish_reason` without `[DONE]`, and `tool_calls` with
+  no call → `ResponseFormatError`; a stream with neither keeps 0.3.0's `BackendError`; other
+  explicit finishes → diagnostic turn. Responses: an unfinished call item inside a *completed*
+  response is a contradiction (`ResponseFormatError`), not a diagnostic turn.
+- *Streamed `reasoning_details`.* OpenRouter documents concatenating chunks in order but not
+  whether fragments of one block share an index. Consecutive fragments with the same integer
+  `index` and `type` are merged; others stay separate. VT is the evidence; revisit if a live
+  replay is refused.
+- *Responses replay items* are the terminal output's `message`, `function_call` and `reasoning`
+  items, verbatim. When the terminal output is empty, the streamed `output_item.done` items are
+  used instead; a call item without one is a stream that ended mid-call.
+- *Retry origin.* The transport-429 marker is an identity object attached to the `BackendError`
+  built in `_http._http_error`; the retry loop wraps only the POST, so nothing after the response
+  headers can be retried. The backoff wait uses a per-call `threading.Event` set by
+  `CancelHandle.cancel()`, so no thread, timer or polling is added.
+- *Live evidence.* No backend was reachable from the build environment, so VT is recorded as
+  blocked for all three routes. Failure injection is offline by design.
+
+**Follow-ups:** run VT on LM Studio, a pinned OpenRouter provider and llama-server before AgentWiz
+admits any of them for adaptive runs; record the reported provider on both turns; if LM Studio's
+stateless Responses replay fails, bring back an explicitly selected, separately verified Chat
+Completions design; scriptSpell's 429→success and exhausted-429 benchmark paths and its
+paid-attempt cap before it opts in.

@@ -1,6 +1,7 @@
 """HTTP transport: per-call no-redirect opener, error mapping, redaction (spec §9)."""
 from __future__ import annotations
 
+import email.utils
 import errno
 import functools
 import http.client
@@ -8,6 +9,7 @@ import json
 import os
 import selectors
 import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -181,13 +183,57 @@ def _http_error(call: Call, exc: urllib.error.HTTPError) -> ModelSpellError:
     if code in (404, 405) and call.route in _VERSION_HINT:
         return call.error(BackendError, f"HTTP {code} at {call.url}: {_VERSION_HINT[call.route]}",
                           status=code, body=body)
-    return call.error(BackendError, f"provider returned HTTP {code} for {call.model!r} at {call.url}: "
-                      f"{call.redact(body)[:1000]}", status=code, body=body)
+    error = call.error(BackendError, f"provider returned HTTP {code} for {call.model!r} at {call.url}: "
+                       f"{call.redact(body)[:1000]}", status=code, body=body)
+    if code == 429:  # 0.4.0 §5: the origin stays private; only this path marks an error retryable
+        error._transport_429 = _TRANSPORT_429
+        error._retry_after = retry_after(exc.headers.get("Retry-After") if exc.headers else None)
+    return error
+
+
+# --- HTTP 429 (0.4.0) ---------------------------------------------------------------------------
+_TRANSPORT_429 = object()  # identity marker: a BackendError that came from this module's HTTP 429 path
+_DIGITS = frozenset("0123456789")
+
+
+def _now() -> float:
+    return time.time()
+
+
+def retry_after(value: Any) -> float | None:
+    """Seconds from a Retry-After header (delta-seconds or HTTP-date), or None when absent or malformed."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > 64:
+        return None
+    if set(value) <= _DIGITS:
+        return float(int(value))
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when is None or when.tzinfo is None:
+        return None
+    return max(0.0, when.timestamp() - _now())
+
+
+def is_transport_429(exc: BaseException) -> bool:
+    return getattr(exc, "_transport_429", None) is _TRANSPORT_429
+
+
+def encode(body: dict) -> bytes:
+    """The request body of an ordinary completion, encoded once (0.3.0's bytes exactly)."""
+    return json.dumps(body).encode("utf-8")
 
 
 def post(call: Call, body: dict, extra_headers, watch: _Watch | None = None) -> Any:
-    return _request(call, {"Content-Type": "application/json"},
-                    json.dumps(body).encode("utf-8"), extra_headers, watch)
+    return post_data(call, encode(body), extra_headers, watch)
+
+
+def post_data(call: Call, data: bytes, extra_headers, watch: _Watch | None = None) -> Any:
+    """POST a prepared body. Retries reuse the same bytes (0.4.0 §5)."""
+    return _request(call, {"Content-Type": "application/json"}, data, extra_headers, watch)
 
 
 def read_json(call: Call, response, dict_only: bool = True, watch: _Watch | None = None) -> Any:

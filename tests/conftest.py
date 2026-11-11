@@ -86,7 +86,7 @@ class TestServer:
                     body = json.loads(raw) if raw else None
                 except ValueError:
                     body = raw
-                srv.requests.append({"method": self.command, "path": self.path, "body": body,
+                srv.requests.append({"method": self.command, "path": self.path, "body": body, "raw": raw,
                                      "headers": {k.lower(): v for k, v in self.headers.items()}})
                 index = len(srv.requests) - 1
                 r = srv.replies.pop(0) if len(srv.replies) > 1 else (srv.replies[0] if srv.replies else Reply())

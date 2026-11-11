@@ -11,7 +11,7 @@ modelSpell is a **controlled adaptation** of the completion client in [NEL](http
 Install from a [GitHub release](https://github.com/alexchwong/modelSpell/releases). Each release attaches one wheel and gives its sha256 in the notes. In a downstream `pyproject.toml` or requirements file, pin it by URL and hash:
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.3.0/modelspell-0.3.0-py3-none-any.whl#sha256=<sha256 from the release notes>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.4.0/modelspell-0.4.0-py3-none-any.whl#sha256=<sha256 from the release notes>
 ```
 
 The wheel contains only the library; it has no dependencies and needs no build step. Releases are the supported install channel; installing from an arbitrary commit is unsupported. `modelspell.__version__` reports the installed version. Licensed under MIT (`LICENSE`).
@@ -22,15 +22,19 @@ Development, tests, the developer test UI and the release process are described 
 
 ```python
 from modelspell import (
-    complete, list_models, list_providers, supported_settings, check_settings,
-    Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing, CancelHandle,
+    complete, complete_with_tools, list_models, list_providers, supported_settings, check_settings,
+    check_tool_request,
+    Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing,
+    ToolDefinition, ToolCall, ToolTurn, ToolOutput, RetryEvent, CancelHandle,
     ModelSpellError, ConfigError, UnsupportedSetting, UnsupportedOperation,
     AuthError, ConnectError, RequestTimeout, BackendError, ResponseFormatError, Cancelled,
 )
 ```
 
 - `Endpoint(kind, base_url=None, api_key=None, api_key_env=None, headers=None)` — `kind` is `"lmstudio"`, `"openrouter"` or `"openai_compat"`. `base_url` is the OpenAI-compatible root **including `/v1`** (defaults: `http://localhost:1234/v1`, `https://openrouter.ai/api/v1`; required for `openai_compat`). OpenRouter's `api_key_env` defaults to `OPENROUTER_API_KEY`.
-- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None, rate_limit_retries=0, max_retry_wait=30.0, on_retry=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `complete_with_tools(endpoint, model, input, *, tools, ...) -> ToolTurn` and `check_tool_request(kind, *, tools, ...) -> None` — client-executed function calling; see [Tool calling](#tool-calling).
+- `rate_limit_retries`, `max_retry_wait`, `on_retry` — opt-in recovery from HTTP 429 on both completion functions; see [HTTP 429 recovery](#http-429-recovery).
 - `CancelHandle()` — pass it as `complete(..., cancel=handle)` and call `handle.cancel()` from any thread to end the call at any stage; see [Cancellation](#cancellation).
 - `supported_settings(kind, reasoning=None) -> frozenset[str]` and `check_settings(kind, *, reasoning=None, max_tokens=None, …, provider=None) -> None` — pure helpers for the generation settings; see below.
 - `list_models(endpoint, *, timeout=15.0) -> list[ModelInfo]` (all kinds) and `list_providers(endpoint, "author/slug", *, timeout=15.0) -> list[ProviderInfo]` (OpenRouter only). No caching.
@@ -46,7 +50,7 @@ from modelspell import (
 | `openrouter` | any | `chat_completions` | `{base_url}/chat/completions` (`off` → `{"effort": "none"}`) |
 | `openai_compat` | `None` only | `chat_completions` | `{base_url}/chat/completions` |
 
-One `complete()` call makes exactly one HTTP request: no retries, no route fallback, no streaming→non-streaming fallback. `reasoning` on `openai_compat`, `provider` on non-OpenRouter kinds, and any sampling argument a route does not send raise `UnsupportedSetting`.
+One `complete()` call makes exactly one HTTP request by default: no retries unless you opt in to [HTTP 429 recovery](#http-429-recovery), no route fallback, no streaming→non-streaming fallback. `reasoning` on `openai_compat`, `provider` on non-OpenRouter kinds, and any sampling argument a route does not send raise `UnsupportedSetting`.
 
 Minimum LM Studio versions: **0.3.29** for `/v1/responses`; **0.4.0** for `reasoning="off"` and for `list_models`.
 
@@ -155,6 +159,58 @@ Both raise `ConfigError` before sending; nothing else changes for calls that use
 
 1. **Non-finite numbers.** `temperature=float("inf")` now raises. In 0.1.0 it produced an invalid JSON body (`Infinity`); NaN was already refused.
 2. **Documented `temperature` ranges.** Above 2 on OpenRouter, or above 1 on LM Studio's native route (`reasoning="off"`), now raises. Before, the backend decided.
+
+## Tool calling
+
+`complete_with_tools()` sends one model turn that offers a set of functions, and returns a `ToolTurn`. modelSpell never runs, authorises or schema-checks a call: you validate each call, dispatch it yourself and send back its result (or a validation error) under the original call ID.
+
+```python
+from modelspell import Message, ToolDefinition, ToolOutput, complete_with_tools
+
+tools = [ToolDefinition("read_label", "Read the fixture label.", {
+    "type": "object",
+    "properties": {"key": {"type": "string"}},
+    "required": ["key"],
+    "additionalProperties": False,
+})]
+history = [Message("user", "Read the label for item 007.")]
+turn = complete_with_tools(endpoint, model, history, tools=tools, cancel=stop)
+
+# you have validated and authorised the one returned call
+(call,) = turn.tool_calls
+follow_up = complete_with_tools(
+    endpoint, model, [*history, turn, ToolOutput(call.id, '{"label":"blue"}')],
+    tools=tools, cancel=stop,
+)
+```
+
+These are two separate model turns. Inspect `follow_up` for text, more calls or truncation.
+
+- **Types.** `ToolDefinition(name, description, parameters)`: `name` matches `^[A-Za-z0-9_-]{1,64}$`; `parameters` is a JSON Schema object, validated and deep-copied into a read-only snapshot when the definition is made. Ints and finite `Decimal` values are sent with their exact digits; non-finite numbers, cycles, non-string keys and other types raise `ConfigError`. `ToolCall(id, name, arguments_json)` holds the provider's call ID, name and argument string **verbatim**, invalid JSON included. `ToolOutput(call_id, content)` is your non-empty text result.
+- **`ToolTurn`.** `result` (the usual `Result`), `tool_calls`, `replay` (a read-only snapshot of exactly what will be sent back on continuation), `route_identity` and `clean`. A **clean** turn finished properly: its calls can be dispatched and the turn appended to history. A **diagnostic** turn (`clean is False`) — truncated, filtered or otherwise not cleanly finished — has `tool_calls == ()` and `replay is None` even if the backend sent complete-looking calls, and is refused if you append it. `ToolTurn` is made only by modelSpell; copies replay fine, pickling is not supported.
+- **History.** Pass a list of `Message`s, `ToolTurn`s and `ToolOutput`s. Every call of a tool-call turn needs exactly one `ToolOutput` before the next message or request; they may be in any order and are sent in call order. Missing, duplicate, orphaned or unknown outputs raise `ConfigError` before anything is sent. `complete()` refuses `ToolTurn` and `ToolOutput` entries.
+- **One route per conversation.** A turn replays only on the same kind, base URL, model, transport, reasoning setting and provider policy it came from; anything else raises `ConfigError`. Rotating the API key is fine.
+- **Settings.** The named generation settings, `timeout`, `on_text` / `on_reasoning` (either enables streaming), `cancel` and the 429 options all work as in `complete()`. There is no `extra=`. Every request needs a non-empty `tools`; for a final-answer turn, resend the definitions with the outputs.
+- **Preflight.** `check_tool_request(kind, *, tools, reasoning=None, provider=None, rate_limit_retries=0, max_retry_wait=30.0, <generation settings>)` runs the route, setting, tool, provider-pin and retry checks with no endpoint, key, transcript or network, and raises what `complete_with_tools()` would.
+- **Stop.** Cancellation ends the call with `Cancelled` and exposes no calls. Check your own Stop again before dispatching and before the next request.
+
+| Backend | Route | Notes |
+|---|---|---|
+| OpenRouter | Chat Completions | **Every tool request needs an explicit pin**: `provider={"order": ["<one slug>"], "allow_fallbacks": False}` (a base or qualified slug; `only`, if given, must be that slug; `ignore` must not exclude it). modelSpell adds `require_parameters: true` on a copy (an explicit `false` is refused). `reasoning_details` (else the reasoning text) is sent back on continuation. |
+| LM Studio | `/v1/responses`, `store: false`, full output items replayed in order (opaque reasoning fields included) | `reasoning="off"` (the native route) is refused for tool turns. Ordinary text requests keep their old body. |
+| llama-server (`openai_compat`) | Chat Completions | Depends on the server build, model and a tool-capable chat template. Reasoning is kept in `result` but not sent back. |
+
+**Verification status (0.4.0).** The request and response formats above, the completed-turn rules and replay are verified offline only, against synthetic fixtures. No live tool round trip has been recorded yet: treat every route as unverified until its `VT` run passes (`tests/fixtures/README.md`). Discovery hints such as `ModelInfo.supports_tools` are advisory and prove nothing.
+
+## HTTP 429 recovery
+
+`complete()` and `complete_with_tools()` accept `rate_limit_retries` (an int from 0 to 3; default 0, one request), `max_retry_wait` (seconds, default 30.0) and `on_retry` (a callback, default `None`).
+
+- Only an HTTP 429 status on the request itself is retried, before any output arrives. Every other failure — other statuses, malformed responses, timeouts, connection errors, an error inside a stream — is raised at once. When retries run out you get the last `BackendError(status=429)`.
+- The wait before each retry is the larger of 1, 2, then 4 seconds and a valid `Retry-After`. If the next wait would take the total past `max_retry_wait`, the last 429 is raised at once, so `max_retry_wait=0` means no retries.
+- Every attempt sends the same body to the same destination with the same routing policy and gets the full `timeout`. A run deadline is yours to enforce, through a `CancelHandle`, which also interrupts the wait.
+- `on_retry` receives `RetryEvent(attempt, next_attempt, delay, status)` before each wait. Its exceptions propagate and nothing more is sent.
+- With paid-request budgets, reserve up to `1 + rate_limit_retries` attempts per call. A retry may recover a temporary admission failure; it says nothing about whether the limit is shared capacity or your account.
 
 ## Behaviour you should know about
 

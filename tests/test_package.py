@@ -1,4 +1,4 @@
-"""Packaging and concurrency: K1–K6 (spec §12.8; K1 updated in spec v8)."""
+"""Packaging and concurrency: K1–K6 (spec §12.8; K1 updated in spec v8 and v9)."""
 import dataclasses
 import importlib.util
 import pathlib
@@ -11,7 +11,8 @@ import pytest
 
 import modelspell
 
-from modelspell import (CancelHandle, Endpoint, Message, ModelInfo, Pricing, ProviderInfo, Result, Usage, complete)
+from modelspell import (CancelHandle, Endpoint, Message, ModelInfo, Pricing, ProviderInfo, Result, RetryEvent, ToolCall,
+                        ToolDefinition, ToolOutput, ToolTurn, Usage, complete)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIELDS = {
@@ -26,17 +27,26 @@ FIELDS = {
                 "pricing", "raw"],
     ProviderInfo: ["name", "slug", "context_length", "max_completion_tokens", "quantization", "pricing",
                    "supported_parameters", "raw"],
+    ToolDefinition: ["name", "description", "parameters"],
+    ToolCall: ["id", "name", "arguments_json"],
+    ToolOutput: ["call_id", "content"],
+    RetryEvent: ["attempt", "next_attempt", "delay", "status"],
 }
+TOOL_TURN_PROPERTIES = ["clean", "replay", "result", "route_identity", "tool_calls"]
 
 
 def test_k1_public_api():
     assert modelspell.__all__ == [
-        "complete", "list_models", "list_providers", "supported_settings", "check_settings",
+        "complete", "complete_with_tools", "list_models", "list_providers", "supported_settings", "check_settings",
+        "check_tool_request",
         "Endpoint", "Message", "Result", "Usage", "ModelInfo", "ProviderInfo", "Pricing",
+        "ToolDefinition", "ToolCall", "ToolTurn", "ToolOutput", "RetryEvent",
         "CancelHandle", "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",
         "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError", "Cancelled"]
     for cls, names in FIELDS.items():
         assert [f.name for f in dataclasses.fields(cls)] == names
+    assert not dataclasses.is_dataclass(ToolTurn)
+    assert sorted(n for n, v in vars(ToolTurn).items() if isinstance(v, property)) == TOOL_TURN_PROPERTIES
 
 
 def test_k2_import_makes_no_network_calls():
@@ -135,6 +145,8 @@ def test_k6_hashable():
         Result("t", None, Usage(1, 2, 3), None, None, False, None, None, None, "responses", ({"a": 1},), {"u": 1}),
         ModelInfo("id", None, None, None, None, None, ("off",), pricing, {"r": 1}),
         ProviderInfo("n", "s", None, None, None, pricing, ("tools",), {"r": 1}),
+        ToolDefinition("t", "d", {"type": "object", "properties": {"a": {"enum": [1, 2]}}}), ToolCall("i", "n", "{"),
+        ToolOutput("i", "x"), RetryEvent(1, 2, 1.0, 429),
     ]
     for obj in instances:
         hash(obj)

@@ -124,3 +124,16 @@ class ProviderInfo:
     pricing: Pricing | None
     supported_parameters: tuple[str, ...]
     raw: dict = field(hash=False)
+
+
+@dataclass(frozen=True)
+class RetryEvent:
+    """One scheduled retry after HTTP 429 (0.4.0 §5). Sent to on_retry before the backoff wait.
+
+    attempt: the one-based attempt that got the 429. next_attempt: the one-based attempt to come,
+    which may still be cancelled before it is sent. delay: the wait in seconds. status: HTTP status.
+    """
+    attempt: int
+    next_attempt: int
+    delay: float
+    status: int

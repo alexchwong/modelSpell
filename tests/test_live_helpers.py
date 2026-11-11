@@ -84,3 +84,27 @@ def test_v2_model_info_identity_and_metadata(monkeypatch, capsys, options):
     assert all(rec["model"] == "m" and rec["model_reasoning_options"] is meta["model_reasoning_options"]
                for rec in records)
     assert [json.loads(line[3:]) for line in capsys.readouterr().out.splitlines()] == records
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_vt_round_trip_against_the_fake(server, capsys, stream):
+    """The VT harness offline: three turns, provider attribution checked, records printed."""
+    from conftest import ep, json_reply, sse_reply
+    tool = sse_reply("chat/or_tool_call_synthetic.sse") if stream else json_reply("chat/or_tool_call_synthetic.json")
+    text = sse_reply("chat/or_text_synthetic.sse") if stream else json_reply("chat/or_text_synthetic.json")
+    server.reply(tool, text, json_reply("chat/or_text_synthetic.json"))
+    turn, follow = live._vt_round_trip(ep(server, "openrouter"), "m", stream=stream, backend="fake",
+                                       requested_provider="deepinfra/turbo",
+                                       provider={"order": ["deepinfra/turbo"], "allow_fallbacks": False})
+    assert len(server.requests) == 3 and turn.clean and follow.clean
+    assert [t["function"]["name"] for t in server.requests[2]["body"]["tools"]] == ["read_label"]
+    records = [json.loads(line[3:]) for line in capsys.readouterr().out.splitlines() if line.startswith("VT ")]
+    assert [r.get("turn") for r in records] == [1, 2, "narrowed_final", None]
+    assert records[-1]["attribution"] == "reported" and records[0]["calls"] == ["read_label", "read_label"]
+
+
+def test_vt_round_trip_provider_mismatch_fails(server):
+    from conftest import ep, json_reply
+    server.reply(json_reply("chat/or_tool_call_synthetic.json"), json_reply("chat/or_text_synthetic.json"))
+    with pytest.raises(AssertionError, match="served by"):
+        live._vt_round_trip(ep(server, "openrouter"), "m", stream=False, backend="fake",
+                            requested_provider="together", provider={"order": ["together"], "allow_fallbacks": False})

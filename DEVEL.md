@@ -1,7 +1,7 @@
 # Developer guide
 
 This file is for repository maintenance. Library usage is documented in `README.md`; the
-behavioural contract is `docs/modelspell_v1_spec_v8.md`; agent operating rules are in
+behavioural contract is `docs/modelspell_v1_spec_v9.md`; agent operating rules are in
 `.clinerules`. Nothing in this guide, `.clinerules`, `tests/`, `ui/`, `scripts/`, `examples/`
 or `docs/` ships in the release wheel.
 
@@ -42,7 +42,7 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 | `scripts/build_release.py` | no | Builds and verifies the release wheel. |
 | `scripts/smoke_installed.py` | no | Smoke test run against an installed wheel (K3, `--smoke`). |
 | `examples/basic.py` | no | Usage example against a local LM Studio. |
-| `docs/` | no | Spec v8 (authoritative), specs v6 and v7 (superseded, kept as history) and design history (informative). |
+| `docs/` | no | Spec v9 (authoritative), specs v6–v8 (superseded, kept as history) and design history (informative). |
 | `.clinerules` | no | Agent operating rules; process detail lives in this guide. |
 | `.gitattributes` | no | Line-ending policy (`* text=auto eol=lf`). |
 | `.github/workflows/` | no | `tests.yml` (push, PR) and `release.yml` (push to `main`). |
@@ -60,9 +60,15 @@ Changes under `modelspell/` must keep these; tests enforce most of them.
 - **No side effects.** No printing, logging, file I/O, network at import, or module-level mutable
   state (§2, K2). This is why the version lives in a `.py` file rather than a text file read at
   import, and why the UI lives outside the package.
-- **One HTTP request per `complete()` call.** No retries, no route or streaming fallback, no
-  redirect following; requests go through the per-call `_NoRedirectHandler` opener, never
-  `urlopen` (§6.3, §9.5).
+- **One HTTP request per `complete()` or `complete_with_tools()` call by default.** The only
+  retry is the opt-in HTTP 429 loop in `_complete._post` (spec v9 §6.11): it retries only an
+  error carrying `_http.py`'s private transport-429 marker, resends the bytes encoded once, and
+  waits through `_Watch.pause`. No route or streaming fallback, no redirect following; requests
+  go through the per-call `_NoRedirectHandler` opener, never `urlopen` (§6.3, §9.5).
+- **Tool turns are sealed.** Only the route parsers, through `ToolTurn._make`, create a
+  `ToolTurn`; `tool_calls` derives from the frozen `replay`; tool bodies are encoded by
+  `_json.dumps` (exact ints and `Decimal`), ordinary bodies by `json.dumps` exactly as in 0.3.0
+  (the goldens). Do not add a public constructor or a pickling path (spec v9 §21.2).
 - **Every completion request goes through the watched opener**, whose connections register and
   initiate each connection attempt atomically (spec v8 §9.6); discovery uses the plain one. A
   `CancelHandle` never holds its lock while caller code runs.
@@ -101,7 +107,9 @@ python -m pytest -m live -s             # live checks; see below
 ```
 
 Test IDs (R1, P7, S13, …) match the spec's §12 tables; keep them in test names or comments when
-adding cases. Cancellation is C1–C9 (`tests/test_cancel.py`, spec v8 §12.10), usage while
+adding cases. Tool calling is T1–T11 (`tests/test_tools.py`, spec v9 §12.11) and HTTP 429
+recovery L1–L13 (`tests/test_retry.py`, §12.12); both use the fake server's `raw` request bytes,
+and retry tests observe backoff by patching `_Watch.pause`, never by sleeping. Cancellation is C1–C9 (`tests/test_cancel.py`, spec v8 §12.10), usage while
 streaming S14, the owner-check battery O1–O7 (`tests/test_owner_checks.py`) and the UI's Stop and
 owner-check routes U11–U16.
 
@@ -136,6 +144,14 @@ configuration and once with one that has none (two short requests each), and rec
 The probe is a diagnostic and is never part of a release check.
 The probe also discovers once, passes the matching entry (or falls back to the id), and reports
 only usable answers in its summaries, including each arm's ok count.
+
+**Tool round trips (VT, spec v9 §17)** use the same variables:
+`python -m pytest -m live -s -k vt`. Each turn prints a `VT {...}` line; paste them into
+`tests/fixtures/README.md` under "Tool round trips". A model that answers without calling skips
+(nothing verified). On OpenRouter set `MODELSPELL_LIVE_OPENROUTER_PROVIDER` to a provider that
+supports tools; a reported provider that differs from the pin fails. Malformed arguments and
+unknown names cannot be injected live (replay accepts only parser-built turns); they are covered
+offline by T6 and T7. `tests/test_live_helpers.py` runs the VT harness against the fake.
 
 Run verification V1 with
 `python -m pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip`
@@ -319,7 +335,7 @@ or a fake one:
 
 The spec is the contract. A behaviour change updates, in the same change:
 
-1. `docs/modelspell_v1_spec_v8.md` (or a new spec version), including §14 if it deviates from NEL;
+1. `docs/modelspell_v1_spec_v9.md` (or a new spec version), including §14 if it deviates from NEL;
 2. the tests named in the spec for that behaviour;
 3. `README.md` where it documents the behaviour;
 4. `NEWS.md` under the next version;
@@ -362,15 +378,19 @@ The release workflow waits for all four test jobs, so macOS failures block publi
 
 1. On `devel`, bump `modelspell/_version.py`.
 2. Add `## X.Y.Z` to `NEWS.md` (the build fails without it).
-3. Run the owner checks' Full preset on every available backend and paste the record into
+3. For a release that changes tool calling, run VT (`-m live -k vt`) on every available backend
+   and record each configuration as passed, failed or blocked; list failed and blocked ones in the
+   NEWS-derived release notes.
+4. Run the owner checks' Full preset on every available backend and paste the record into
    `tests/fixtures/README.md`; record unavailable backends as blocked; claim live verification in
-   the README only for checks that passed. Do this before step 4: `README.md` is in the wheel.
-4. Commit, then run `python scripts/build_release.py --smoke` locally. It builds from the
-   committed `HEAD`; uncommitted edits are excluded and reported.
-5. Merge `devel` into `main`.
-6. Check the release page: wheel attached, notes correct, install line works in a fresh venv.
+   the README only for checks that passed. Do this before step 5: `README.md` is in the wheel.
+5. Commit, then run `python scripts/build_release.py --smoke` locally. It builds from the
+   committed `HEAD`; uncommitted edits are excluded and reported. The smoke runs one `complete()`
+   call and a two-turn `complete_with_tools()` exchange from the installed wheel.
+6. Merge `devel` into `main`.
+7. Check the release page: wheel attached, notes correct, install line works in a fresh venv.
 
-**A release co-developed with a downstream project** (such as AgentWiz): the wheel from step 4,
+**A release co-developed with a downstream project** (such as AgentWiz): the wheel from step 5,
 built from the committed `devel` HEAD, is the *release candidate*. Do not merge to `main` until the
 downstream project has retested against it, and keep the shipped files unchanged meanwhile. A
 defect found downstream means a fix on `devel` and a new candidate. After the release, compare the
@@ -382,7 +402,7 @@ published release; fix on `devel` and release a patch version.
 Downstream projects should depend on the release wheel by URL and hash, e.g.
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.3.0/modelspell-0.3.0-py3-none-any.whl#sha256=<sha256>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.4.0/modelspell-0.4.0-py3-none-any.whl#sha256=<sha256>
 ```
 
 Releases are the supported install channel. Installing from an arbitrary commit

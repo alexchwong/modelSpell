@@ -61,6 +61,11 @@ class Acc:
             if self._on_reasoning:
                 self._call(self._on_reasoning, s)
 
+    def admit(self) -> None:
+        """The admission point for a fragment that reaches no callback (a tool-call fragment, 0.4.0)."""
+        if self._watch is not None:
+            self._watch.admit()
+
     def terminal(self) -> None:
         """The route read its terminal event: the streaming commit point."""
         if self._watch is not None:

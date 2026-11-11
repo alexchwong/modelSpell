@@ -3,6 +3,7 @@
 LM Studio:    MODELSPELL_LIVE_LMSTUDIO_URL, MODELSPELL_LIVE_LMSTUDIO_MODEL
 OpenRouter:   OPENROUTER_API_KEY, MODELSPELL_LIVE_OPENROUTER_MODEL, MODELSPELL_LIVE_OPENROUTER_PROVIDER (optional)
 llama-server: MODELSPELL_LIVE_LLAMASERVER_URL (including /v1), MODELSPELL_LIVE_LLAMASERVER_MODEL  (V2, owner checks)
+Tool round trips (VT): the same variables; run with -k vt -s.
 Owner checks: MODELSPELL_LIVE_PRESET (Quick, Cancellation, Usage, Full; default Full). Run with -s to see the record.
 Each call is checked on its own; live results are never compared with each other.
 """
@@ -273,3 +274,90 @@ def test_live_owner_checks_lmstudio(route, lms_info):
 def test_live_owner_checks_llamaserver():
     from ui.owner_checks import Battery
     _owner_checks(Battery(Endpoint(kind="openai_compat", base_url=LLS_URL), LLS_MODEL, PRESET))
+
+
+# --- VT: tool-call round trips (spec v9 §17, §21.6) ---------------------------------------------------
+#
+# Each run prints one `VT {...}` JSON line per turn. Request acceptance and the observed model outcome
+# are recorded separately: a model that answers without calling verifies nothing (the test skips).
+# Failure injection (malformed arguments, unknown names) is covered offline by tests/test_tools.py;
+# a parser-built turn cannot be forged live.
+
+def _vt_tools():
+    from modelspell import ToolDefinition
+    obj = {"type": "object", "additionalProperties": False}
+    return [ToolDefinition("read_label", "Read the label of a fixture item. Always call this to learn a label.",
+                           {**obj, "properties": {"key": {"type": "string"}}, "required": ["key"]}),
+            ToolDefinition("write_note", "Write a note. Never needed for labels.",
+                           {**obj, "properties": {"text": {"type": "string"}}, "required": ["text"]})]
+
+
+VT_PROMPT = [{"role": "system", "content": "Use the read_label tool to answer. Answer in one word."},
+             {"role": "user", "content": "What is the label of item 007?"}]
+
+
+def _vt_record(**fields):
+    print("VT " + json.dumps(fields, sort_keys=True))
+
+
+def _vt_round_trip(endpoint, model, *, stream, backend, requested_provider=None, **kw):
+    from modelspell import Message, ToolOutput, complete_with_tools
+    tools = _vt_tools()
+    stream_kw = {"on_text": lambda s: None} if stream else {}
+    meta = dict(backend=backend, model=model, stream=stream, reasoning=kw.get("reasoning"),
+                requested_provider=requested_provider)
+    turn = complete_with_tools(endpoint, model, VT_PROMPT, tools=tools, max_tokens=2048, timeout=600,
+                               **stream_kw, **kw)
+    reported = [turn.result.provider]
+    _vt_record(**meta, turn=1, accepted=True, clean=turn.clean, finish=turn.result.finish_reason,
+               calls=[c.name for c in turn.tool_calls], served_by=turn.result.provider)
+    if not turn.tool_calls:
+        pytest.skip(f"{backend}: the model answered without a call (clean={turn.clean}); round trip not observed")
+    outputs = [ToolOutput(c.id, '{"label": "blue"}' if c.name == "read_label" else '{"error": "not allowed"}')
+               for c in turn.tool_calls]
+    history = [*VT_PROMPT, turn, *outputs]
+    follow = complete_with_tools(endpoint, model, history, tools=tools, max_tokens=2048, timeout=600,
+                                 **stream_kw, **kw)
+    reported.append(follow.result.provider)
+    _vt_record(**meta, turn=2, accepted=True, clean=follow.clean, finish=follow.result.finish_reason,
+               calls=[c.name for c in follow.tool_calls], text=follow.result.text[:80], served_by=follow.result.provider)
+    # narrower authorised set and a final-answer request with retained definitions (acceptance only)
+    narrowed = complete_with_tools(endpoint, model, [*history, Message("user", "Answer now in one word.")],
+                                   tools=tools[:1], max_tokens=2048, timeout=600, **kw)
+    _vt_record(**meta, turn="narrowed_final", accepted=True, clean=narrowed.clean,
+               finish=narrowed.result.finish_reason, calls=[c.name for c in narrowed.tool_calls])
+    if requested_provider is not None:
+        known = [p for p in reported if p]
+        _vt_record(**meta, attribution="unverified" if len(known) < len(reported) else "reported", reported=reported)
+        for name in known:
+            assert _vt_norm(requested_provider.split("/", 1)[0]) == _vt_norm(name), \
+                f"requested {requested_provider!r}, served by {name!r}"
+    return turn, follow
+
+
+def _vt_norm(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+@need_lms
+@pytest.mark.parametrize("reasoning", [None, "high"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_live_vt_lmstudio(stream, reasoning):
+    _vt_round_trip(Endpoint(kind="lmstudio", base_url=LMS_URL), LMS_MODEL, stream=stream, backend="lmstudio",
+                   reasoning=reasoning)
+
+
+@need_or
+@pytest.mark.parametrize("stream", [False, True])
+def test_live_vt_openrouter(stream):
+    e = Endpoint(kind="openrouter")
+    slug = OR_PROVIDER or next(p.slug for p in list_providers(e, OR_MODEL) if p.slug)
+    _vt_round_trip(e, OR_MODEL, stream=stream, backend="openrouter", requested_provider=slug,
+                   provider={"order": [slug], "allow_fallbacks": False})
+
+
+@need_lls
+@pytest.mark.parametrize("stream", [False, True])
+def test_live_vt_llamaserver(stream):
+    _vt_round_trip(Endpoint(kind="openai_compat", base_url=LLS_URL), LLS_MODEL, stream=stream,
+                   backend=f"llama-server {_llama_version()}")

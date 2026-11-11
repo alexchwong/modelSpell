@@ -473,11 +473,16 @@ V021 = [("endpoint", "POSITIONAL_OR_KEYWORD", inspect.Parameter.empty),
     [("timeout", "KEYWORD_ONLY", 900.0), ("on_text", "KEYWORD_ONLY", None), ("on_reasoning", "KEYWORD_ONLY", None)]
 
 
+V040 = [("rate_limit_retries", "KEYWORD_ONLY", 0), ("max_retry_wait", "KEYWORD_ONLY", 30.0),
+        ("on_retry", "KEYWORD_ONLY", None)]  # spec v9 §6.11: additive again in 0.4.0
+
+
 def test_c8_additive_signature():
     params = list(inspect.signature(complete).parameters.values())
-    assert [(p.name, p.kind.name, p.default) for p in params[:-1]] == V021
-    last = params[-1]
-    assert (last.name, last.kind, last.default) == ("cancel", inspect.Parameter.KEYWORD_ONLY, None)
+    assert [(p.name, p.kind.name, p.default) for p in params[:len(V021)]] == V021
+    cancel = params[len(V021)]
+    assert (cancel.name, cancel.kind, cancel.default) == ("cancel", inspect.Parameter.KEYWORD_ONLY, None)
+    assert [(p.name, p.kind.name, p.default) for p in params[len(V021) + 1:]] == V040
     assert Cancelled().sent is None and Cancelled().partial is None
 
 

@@ -51,6 +51,9 @@ Check every captured file for the key before committing it. Add a row below with
 | discovery/openrouter_endpoints_synthetic.json | synthetic | `/endpoints`: `tag` with `/`, mixed-case `tag`, no `tag`, no name | no OpenRouter key |
 | discovery/lmstudio_models_synthetic.json | synthetic | loaded LLM, unloaded LLM, embedding | no LM Studio |
 | discovery/compat_models_synthetic.json | synthetic | generic `/models` (`id`/`slug`/string rows, duplicate) | no openai_compat server |
+| chat/or_tool_call_synthetic.{json,sse} | synthetic | 0.4.0 tool turn: two calls fragmented by index, interleaved text, streamed `reasoning_details` fragments (same index), usage-only chunk, cost; T5 pair | no OpenRouter key in the build environment |
+| chat/compat_tool_call_synthetic.{json,sse} | synthetic | 0.4.0 llama-server-style tool turn: `content: null`, `reasoning_content`, one call; T5 pair | no llama-server in the build environment |
+| responses/resp_tool_call_synthetic.{json,sse} | synthetic | 0.4.0 Responses tool turn: reasoning item with `encrypted_content`, message, `function_call` (`id` ≠ `call_id`); full event sequence with argument deltas; T5 pair | no LM Studio in the build environment |
 | tls/localhost.{crt,key} | test certificate | self-signed, CN and SAN `localhost`, `127.0.0.1`, 100-year validity; HTTPS cancellation tests (C1, spec v8 §12.10); not a response fixture | — |
 
 ## Verification V1 (§17)
@@ -252,3 +255,21 @@ recorded. Fields under test went through `extra`.
 Full answers are in Appendix A of the *modelSpell 0.2.1 technical specification* (v6). Later output
 of `tests/probe_lmstudio.py` may be kept under `tests/fixtures/evidence/` with the date, LM Studio
 version, engine and model; it is informal and nothing cites it.
+
+## Tool round trips (VT, spec v9 §17) — 0.4.0
+
+Run `python -m pytest -m live -s -k vt` with the live variables. Paste every `VT {...}` line here with
+the date, the backend version or provider pin, and the classification. A configuration is admitted for
+AgentWiz adaptive runs only when its VT run passed (a real call, a result-aware continuation and the
+narrowed final-answer request accepted, in both stream modes). Request acceptance and the model's
+behaviour are separate fields; a model that answered without calling verifies nothing.
+
+| Backend | Route | Reasoning | Stream modes | Status |
+|---|---|---|---|---|
+| LM Studio | responses (`store: false`, stateless replay) | default, `high` | both | blocked — no LM Studio in the 0.4.0 build environment (11 Nov 2026) |
+| OpenRouter | chat_completions, pinned, `require_parameters: true` | default | both | blocked — no OpenRouter key in the 0.4.0 build environment (11 Nov 2026) |
+| llama-server | chat_completions (`openai_compat`) | server/template default | both | blocked — no llama-server in the 0.4.0 build environment (11 Nov 2026) |
+
+Offline coverage: T1–T11 (`tests/test_tools.py`), L1–L13 (`tests/test_retry.py`), the VT harness
+against the fake (`tests/test_live_helpers.py`), and the installed-wheel tool smoke. None of these is
+live verification.
