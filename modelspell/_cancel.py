@@ -8,6 +8,7 @@ operation the calling thread is in. The lock is never held while caller code run
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import socket
 import threading
 
@@ -19,6 +20,7 @@ class CancelHandle:
         self._lock = threading.Lock()
         self._cancelled = False
         self._watches: set[_Watch] = set()
+        self._children: set[CancelHandle] = set()
 
     @property
     def cancelled(self) -> bool:
@@ -33,6 +35,20 @@ class CancelHandle:
             self._cancelled = True
             for watch in self._watches:
                 watch._abort_locked()  # shutdown() only: non-blocking
+            for child in self._children:
+                child.cancel()
+
+    @contextmanager
+    def _link(self, child: CancelHandle):
+        with self._lock:
+            if self._cancelled:
+                child.cancel()
+            self._children.add(child)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._children.discard(child)
 
     def __repr__(self) -> str:
         return f"CancelHandle(cancelled={self._cancelled})"

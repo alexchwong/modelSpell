@@ -40,7 +40,11 @@ class BackendError(ModelSpellError):
 
 
 class ResponseFormatError(BackendError):
-    pass
+    @property
+    def diagnostic(self) -> dict:
+        """Bounded structural details safe for verification reports."""
+        return getattr(self, "_diagnostic", {"parser": "response rejected", "structure": None,
+                                              "finish_reason": None, "reported_provider": None})
 
 
 class Cancelled(ModelSpellError):

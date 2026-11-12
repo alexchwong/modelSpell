@@ -42,7 +42,8 @@ def test_k1_public_api():
         "Endpoint", "Message", "Result", "Usage", "ModelInfo", "ProviderInfo", "Pricing",
         "ToolDefinition", "ToolCall", "ToolTurn", "ToolOutput", "RetryEvent",
         "CancelHandle", "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",
-        "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError", "Cancelled"]
+        "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError", "Cancelled",
+        "choose_provider", "ProviderSelection", "ProviderSelectionError"]
     for cls, names in FIELDS.items():
         assert [f.name for f in dataclasses.fields(cls)] == names
     assert not dataclasses.is_dataclass(ToolTurn)

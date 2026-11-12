@@ -21,11 +21,19 @@ BODIES = []
 
 
 class Stub(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.reply({"data": {"endpoints": [{"tag": "test/fast", "provider_name": "Test",
+                    "pricing": {"prompt": "0", "completion": "0"},
+                    "throughput_last_30m": {"p50": 90}}]}})
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         BODIES.append(body)
         tool_turn = "tools" in body and not any(m.get("role") == "tool" for m in body["messages"])
-        reply = json.dumps(CALL if tool_turn else TEXT).encode()
+        self.reply(CALL if tool_turn else TEXT)
+
+    def reply(self, value):
+        reply = json.dumps(value).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(reply)))
         self.end_headers()
@@ -52,5 +60,9 @@ follow = modelspell.complete_with_tools(endpoint, "m", [*history, turn, modelspe
                                         tools=tools)
 assert follow.clean and follow.tool_calls == () and follow.result.text == "pong", follow
 assert BODIES[-1]["messages"][-1] == {"role": "tool", "tool_call_id": "call_1", "content": "blue"}, BODIES[-1]
+router = modelspell.Endpoint("openrouter", endpoint.base_url, api_key="synthetic-smoke-key")
+selection = modelspell.choose_provider(router, "test/model", provider={"max_price": {"prompt": 1}})
+assert selection.slug == "test/fast" and selection.evidence["attempts"][0]["sent"]
+assert modelspell.complete(router, "test/model", "ping", provider=selection.policy).text == "pong"
 print("smoke ok:", modelspell.__file__)
 httpd.shutdown()

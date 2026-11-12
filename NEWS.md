@@ -1,5 +1,7 @@
 # NEWS
 ## 0.4.0
+- OpenRouter provider selection adds Managed, Manual pin and Automatic routing with Cheapest, Balanced and Fastest presets.
+- Internal HTTP request representations redact the API key.
 - New `complete_with_tools()`: offer functions, receive complete calls, return results under the original call IDs.
 - New `ToolDefinition`, `ToolCall`, `ToolTurn` and `ToolOutput`; `ToolTurn.replay` shows exactly what continuation sends.
 - Calls are returned only from a cleanly finished turn; truncated or unfinished turns have none and cannot be replayed.

@@ -29,6 +29,7 @@ from typing import Any, Callable
 
 import modelspell
 from modelspell import AuthError, BackendError, CancelHandle, Cancelled, ConnectError, Endpoint, ModelInfo, Result
+from modelspell._json import thaw
 
 # --- fixed inputs (OC-2): constants, so records compare across runs --------------------------------
 
@@ -223,6 +224,7 @@ class Battery:
 
     def __init__(self, endpoint: Endpoint, model: str | ModelInfo, preset: str = DEFAULT_PRESET, *,
                  route: str = "default", provider_pin: str | None = None, timing: Timing = Timing(),
+                 selection_options: dict | None = None,
                  triggers: dict[str, Callable[[], threading.Event]] | None = None,
                  complete: Callable = modelspell.complete, list_models: Callable = modelspell.list_models):
         if not isinstance(endpoint, Endpoint):
@@ -237,12 +239,16 @@ class Battery:
             raise ValueError("model must be a non-empty id or a ModelInfo")
         self.endpoint, self.model, self.preset, self.route = endpoint, model, preset, route
         self.provider_pin = provider_pin if endpoint.kind == "openrouter" else None
+        self._selection_options = selection_options
+        self._provider_policy = None
         self.timing, self._triggers = timing, dict(triggers or {})
         self._complete, self._list_models = complete, list_models
         self.checks = PRESETS[preset]
         self.requests = validate_preset(self.checks)
         self.discovery = route == "native" and not isinstance(model, ModelInfo)
-        if self.requests + self.discovery > MAX_REQUESTS:
+        self.selection_probes = 4 if selection_options and selection_options["mode"] == "automatic" else 0
+        self.selection_discovery = int(bool(selection_options and selection_options["mode"] != "managed"))
+        if self.requests + self.discovery + self.selection_probes + self.selection_discovery > MAX_REQUESTS:
             raise ValueError(f"run would send more than {MAX_REQUESTS} requests")
         self._lock = threading.Lock()
         self._events: queue.Queue = queue.Queue()
@@ -356,7 +362,8 @@ class Battery:
         return {"type": "plan", "kind": self.endpoint.kind, "route": self.route, "model": self._config()["model"],
                 "provider_pin": self.provider_pin, "preset": self.preset, "checks": list(self.checks),
                 "calls": len(self.checks), "requests": self.requests,
-                "discovery_requests": int(self.discovery), "max_tokens": info["max_tokens"],
+                "discovery_requests": int(self.discovery) + self.selection_discovery,
+                "selection_probe_limit": self.selection_probes, "max_tokens": info["max_tokens"],
                 "padded_chars": info["padded_chars"], "padded_tokens_approx": info["padded_tokens_approx"],
                 "max_requests": MAX_REQUESTS}
 
@@ -378,6 +385,13 @@ class Battery:
             if self.discovery and not self._prepare():
                 return
             blocked_reason = None
+            if self._selection_options and self._selection_options["mode"] != "managed":
+                try:
+                    self._select_provider()
+                except modelspell.Cancelled:
+                    return
+                except modelspell.ModelSpellError as exc:
+                    blocked_reason = str(exc)
             for name in self.checks:
                 if blocked_reason is not None:
                     rows.append(self._row(name, "blocked", blocked_reason))
@@ -464,9 +478,31 @@ class Battery:
         row.update(kw)
         return row
 
+    def _select_provider(self):
+        handle = modelspell.CancelHandle()
+        with self._lock:
+            if self._stopped:
+                return
+            self._active = handle
+        try:
+            model = self.model.id if isinstance(self.model, ModelInfo) else self.model
+            output_tokens = max(CHECKS[name].prompt[1] for name in self.checks)
+            input_tokens = PADDED_CHARS // 4 if "cancel_first_token" in self.checks else 600
+            selected = modelspell.choose_provider(self.endpoint, model, cancel=handle, input_tokens=input_tokens,
+                                                  output_tokens=output_tokens, **self._selection_options)
+            self.provider_pin, self._provider_policy = selected.slug, selected.policy
+            self._record.config["provider_pin"] = selected.slug
+            self._record.config["provider_policy"] = thaw(selected.policy)
+            self._record.config["provider_selection"] = thaw(selected.evidence)
+        finally:
+            with self._lock:
+                self._active = None
+
     def _kwargs(self) -> dict:
         kw: dict = {"reasoning": "off" if self.route == "native" else None, "timeout": TIMEOUT}
-        if self.provider_pin:
+        if self._provider_policy is not None:
+            kw["provider"] = self._provider_policy
+        elif self.provider_pin:
             kw["provider"] = {"order": [self.provider_pin], "allow_fallbacks": False}
         return kw
 

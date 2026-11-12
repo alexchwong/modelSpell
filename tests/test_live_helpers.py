@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import test_live as live
-from modelspell import Endpoint, ModelInfo, supported_settings
+from modelspell import Endpoint, ModelInfo, ProviderSelection, supported_settings
 
 
 @pytest.mark.parametrize("kind,reasoning", [
@@ -21,6 +21,7 @@ def test_v2_metadata_does_not_consume_request_arguments(monkeypatch, capsys, kin
     meta = dict(backend=kind, route=route, version="test-build")
     if provider_slug:
         meta["provider"] = provider_slug
+        meta["policy"] = {"order": [provider_slug], "allow_fallbacks": False, "max_price": {"prompt": 1}}
 
     def complete(endpoint_arg, model, prompt, **kw):
         assert endpoint_arg is endpoint and model == "example/model" and prompt == live.V2_PROMPT
@@ -36,7 +37,7 @@ def test_v2_metadata_does_not_consume_request_arguments(monkeypatch, capsys, kin
     else:
         cases = [("temperature", 2), ("temperature", 2.01)]
         records = live._v2_extra(endpoint, "example/model", cases, reasoning=reasoning,
-                                 provider_pin=provider_slug, **meta)
+                                 **meta)
         names, values = zip(*cases)
 
     assert len(calls) == len(records) == len(names)
@@ -46,7 +47,7 @@ def test_v2_metadata_does_not_consume_request_arguments(monkeypatch, capsys, kin
         assert kw.get("reasoning") == reasoning
         assert not {"meta", "backend", "route", "version"} & kw.keys()
         if provider_slug:
-            assert kw["provider"] == {"order": [provider_slug], "allow_fallbacks": False}
+            assert kw["provider"] is meta["policy"]
         else:
             assert "provider" not in kw
         if via == "argument":
@@ -85,26 +86,38 @@ def test_v2_model_info_identity_and_metadata(monkeypatch, capsys, options):
                for rec in records)
     assert [json.loads(line[3:]) for line in capsys.readouterr().out.splitlines()] == records
 
+def _fake_selection(slug):
+    return ProviderSelection(slug, {"order": [slug], "allow_fallbacks": False},
+                             {"scope": "specific as published", "discovery": [
+                                 {"slug": "deepinfra/turbo", "provider_name": "DeepInfra"},
+                                 {"slug": "together", "provider_name": "Together"}]})
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_vt_round_trip_against_the_fake(server, capsys, stream):
-    """The VT harness offline: three turns, provider attribution checked, records printed."""
     from conftest import ep, json_reply, sse_reply
     tool = sse_reply("chat/or_tool_call_synthetic.sse") if stream else json_reply("chat/or_tool_call_synthetic.json")
-    text = sse_reply("chat/or_text_synthetic.sse") if stream else json_reply("chat/or_text_synthetic.json")
-    server.reply(tool, text, json_reply("chat/or_text_synthetic.json"))
+    blue = b'{"provider":"DeepInfra","choices":[{"message":{"content":"blue"},"finish_reason":"stop"}]}'
+    from conftest import Reply
+    if stream:
+        blue = [b'data: {"provider":"DeepInfra","choices":[{"delta":{"content":"blue"},"finish_reason":"stop"}]}\n\n'
+                b'data: [DONE]\n\n']
+    server.reply(tool, Reply(body=blue), Reply(body=blue))
+    chosen = _fake_selection("deepinfra/turbo")
     turn, follow = live._vt_round_trip(ep(server, "openrouter"), "m", stream=stream, backend="fake",
-                                       requested_provider="deepinfra/turbo",
-                                       provider={"order": ["deepinfra/turbo"], "allow_fallbacks": False})
+                                       selection=chosen, provider=chosen.policy)
     assert len(server.requests) == 3 and turn.clean and follow.clean
     assert [t["function"]["name"] for t in server.requests[2]["body"]["tools"]] == ["read_label"]
+    assert server.requests[2]["body"]["stream"] is stream
     records = [json.loads(line[3:]) for line in capsys.readouterr().out.splitlines() if line.startswith("VT ")]
-    assert [r.get("turn") for r in records] == [1, 2, "narrowed_final", None]
-    assert records[-1]["attribution"] == "reported" and records[0]["calls"] == ["read_label", "read_label"]
+    assert len([r for r in records if r.get("attribution") == "confirmed"]) == 3
+    assert any(r.get("calls") == ["read_label", "read_label"] for r in records)
 
 
 def test_vt_round_trip_provider_mismatch_fails(server):
     from conftest import ep, json_reply
     server.reply(json_reply("chat/or_tool_call_synthetic.json"), json_reply("chat/or_text_synthetic.json"))
-    with pytest.raises(AssertionError, match="served by"):
+    chosen = _fake_selection("together")
+    with pytest.raises(AssertionError, match="Together|DeepInfra|together"):
         live._vt_round_trip(ep(server, "openrouter"), "m", stream=False, backend="fake",
-                            requested_provider="together", provider={"order": ["together"], "allow_fallbacks": False})
+                            selection=chosen, provider=chosen.policy)

@@ -2,6 +2,7 @@
 from ._cancel import CancelHandle
 from ._complete import check_settings, complete, supported_settings
 from ._discovery import list_models, list_providers
+from ._provider import ProviderSelection, ProviderSelectionError, choose_provider
 from ._tools import ToolCall, ToolDefinition, ToolOutput, ToolTurn, check_tool_request, complete_with_tools
 from ._version import __version__  # noqa: F401  (single source: _version.py)
 from ._types import Endpoint, Message, ModelInfo, Pricing, ProviderInfo, Result, RetryEvent, Usage
@@ -16,5 +17,5 @@ __all__ = [
     "CancelHandle",
     "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",
     "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError",
-    "Cancelled",
+    "Cancelled", "choose_provider", "ProviderSelection", "ProviderSelectionError",
 ]

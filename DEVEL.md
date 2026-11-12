@@ -364,40 +364,44 @@ This verifies the committed wheel and its clean-venv installation even if the su
 test skips because wheel building is unavailable; build failures fail the job instead.
 The release workflow waits for all four test jobs, so macOS failures block publication too.
 
-`release.yml` runs on every push to `main` (and manually). It reruns the tests, then:
+### OpenRouter verification and release checklist
 
-- **If `vX.Y.Z` is not yet released:** builds the wheel from `HEAD`, verifies its contents and
-  metadata, installs it into a fresh venv and runs the smoke test, then creates release `vX.Y.Z`
-  with the wheel attached. The release notes are the NEWS section plus a pinned install line with
-  the wheel's sha256.
-- **If `vX.Y.Z` already exists:** fails if any shipped file (`modelspell/`, `pyproject.toml`,
-  `README.md`, `LICENSE`) changed since the tag, so shipped changes cannot reach `main` without a
-  version bump. Changes to tests, the UI, scripts or docs merge without a release.
+1. Update the version, NEWS, spec, documentation and evidence summary on `devel` before building
+   the final candidate. Record blocked or failed cases and their diagnoses. Keep previous live captures.
+2. From the committed candidate checkout, export the rotated, funded `OPENROUTER_API_KEY` and run
+   `python3 scripts/verify_provider_refactor.py`. It uses the repo's `.venv` for the offline suite,
+   pins the source commit, builds and smoke-tests the candidate, then runs the committed harness
+   from a fresh wheel-only environment. Reports and wheels are retained per run under
+   `reports/provider-refactor/`.
+3. Check the last line, `release_gate pass|fail|pending`. The named gate requires one Automatic
+   Balanced ZDR pin above 50 tokens/s to complete streamed and non-streamed VT on the same
+   candidate and effective policy. Exit 0 means the full run passed. Exit 1 means a correctness
+   check failed. Exit 2 means the named gate passed with other live cases blocked. Exit 3 means the
+   named gate is pending. Review every blocked and failed case. Resolve all named response-format
+   incidents before publication.
+4. For report-only triage run
+   `python3 scripts/verify_provider_refactor.py --triage ORIGINAL_REPORT INCIDENT_ID upstream "Evidence-based reason"`.
+   Use `modelspell` for a confirmed modelSpell defect. Each verdict produces a separate JSON file with
+   cumulative outcomes. Retain the original and each verdict. If the named case needs another model
+   or cost ceiling, use `--release-model`, `--release-max-input-price` or `--release-max-output-price`.
+   Price overrides are USD per million tokens and the fixed charge remains zero.
+5. Retest AgentWiz against the wheel and SHA-256 from the qualifying report before publication.
+   Record the actual endpoint, model, transport, reasoning, pin and scope, provider or served variant,
+   quantization and effective policy. Repeat VT under AgentWiz's actual policy when relevant routing
+   constraints change or the pin is ambiguous. A defect requires a new candidate and fresh evidence.
+6. Stage the exact verified wheel and the qualifying report (or latest qualifying triage record)
+   on a GitHub draft release for the version. Name the staged report `provider-gate.json`.
+   Target the tested source commit. Merge to `main` with the verified payload. If the merge changes
+   the payload, verify a new candidate. The release workflow reruns offline checks, verifies the staged
+   gate report, verifies that the tested source has the same payload as `main`, and publishes the
+   staged wheel bytes. Run the workflow manually if the push ran before staging.
+7. Check the published SHA-256 against the candidate and test the install line in a fresh environment.
 
-### Release checklist
-
-1. On `devel`, bump `modelspell/_version.py`.
-2. Add `## X.Y.Z` to `NEWS.md` (the build fails without it).
-3. For a release that changes tool calling, run VT (`-m live -k vt`) on every available backend
-   and record each configuration as passed, failed or blocked; list failed and blocked ones in the
-   NEWS-derived release notes.
-4. Run the owner checks' Full preset on every available backend and paste the record into
-   `tests/fixtures/README.md`; record unavailable backends as blocked; claim live verification in
-   the README only for checks that passed. Do this before step 5: `README.md` is in the wheel.
-5. Commit, then run `python scripts/build_release.py --smoke` locally. It builds from the
-   committed `HEAD`; uncommitted edits are excluded and reported. The smoke runs one `complete()`
-   call and a two-turn `complete_with_tools()` exchange from the installed wheel.
-6. Merge `devel` into `main`.
-7. Check the release page: wheel attached, notes correct, install line works in a fresh venv.
-
-**A release co-developed with a downstream project** (such as AgentWiz): the wheel from step 5,
-built from the committed `devel` HEAD, is the *release candidate*. Do not merge to `main` until the
-downstream project has retested against it, and keep the shipped files unchanged meanwhile. A
-defect found downstream means a fix on `devel` and a new candidate. After the release, compare the
-released wheel with the candidate: equal sha256, or every member byte-identical after unpacking
-(including `METADATA`, `WHEEL` and `RECORD`), means it is the tested candidate; any differing member
-makes it a new candidate that the downstream project retests before pinning. Never edit a
-published release; fix on `devel` and release a patch version.
+For targeted OpenRouter V1, V2, and VT checks, set `MODELSPELL_LIVE_OPENROUTER_MODEL` in
+addition to the key. The optional `MODELSPELL_LIVE_OPENROUTER_PROVIDER` is a strict manual
+override. Without it the checks use Automatic Balanced. V1 and V2 share a compatible pin.
+Streamed and non-streamed VT share their tool pin. Unpinned discovery, streaming and the
+owner checks remain available independently.
 
 Downstream projects should depend on the release wheel by URL and hash, e.g.
 

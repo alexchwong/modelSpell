@@ -299,6 +299,55 @@ It covers servers that accept the Chat Completions request shape and return stan
 
 `ProviderInfo.slug` is OpenRouter's endpoint `tag`, passed verbatim (case and `/` suffix kept) for use in `provider={"order": [slug]}` or `"only"`; it is `None` when absent and never derived from the display name. You can always pass a known slug directly without calling `list_providers()`.
 
+## OpenRouter provider selection
+
+`choose_provider(endpoint, model, *, mode="automatic", pin=None, provider=None,
+preset="balanced", balanced_min_tps=None, tools=False, settings=None, input_tokens=600,
+output_tokens=200, timeout=30, max_attempts=4, cancel=None)` returns a frozen
+`ProviderSelection(slug, policy, evidence)`.
+
+| Mode | Behaviour |
+|---|---|
+| `managed` | Return the optional native policy for ordinary completions. OpenRouter chooses the route. |
+| `manual` | Validate the pin against published tags or provider scope and send the requested slug verbatim with fallbacks disabled. |
+| `automatic` | Discover, rank and confirm a specific published route with a short synthetic request. |
+
+Automatic `cheapest` ranks by request cost above 20 tokens/s. `balanced` ranks by cost above
+50 tokens/s, or the supplied `balanced_min_tps`. `fastest` ranks by estimated time to first
+token plus output time. Cost uses the input and output token estimates, published prices,
+and any published request charge or separate discount. Routes exactly at the floor are excluded.
+
+```python
+from modelspell import Endpoint, choose_provider, complete
+
+endpoint = Endpoint("openrouter")
+model = "openai/gpt-oss-120b"
+selection = choose_provider(
+    endpoint, model, provider={"zdr": True}, settings={"max_tokens": 128}
+)
+result = complete(endpoint, model, "Say hello.", max_tokens=128, provider=selection.policy)
+```
+
+- Pass `selection.policy` directly to either completion API and its preflight. Set `tools=True`
+  when selecting for `complete_with_tools()`. Tool workflows use Manual or Automatic and keep the
+  same effective policy throughout replay. A tool-shaped probe offers an inert tool and executes
+  no tool.
+- `settings` contains the intended generation keyword arguments. Set token estimates for the
+  expected workload. The selector uses a 64-token probe cap when `max_tokens` is omitted.
+- Automatic accepts `only`, `ignore`, `quantizations`, `max_price`, `zdr`, `data_collection`,
+  `require_parameters`, and `allow_fallbacks=False`. OpenRouter remains authoritative for account
+  restrictions. Price caps use USD per million prompt or completion tokens, or USD per request or image.
+- Accounts enforcing ZDR can pass `{"zdr": True}` to activate the optional catalogue shortlist.
+  All fallback probes retain the ZDR policy. Catalogue membership and Safety Retention are recorded
+  separately.
+- Reuse a selection for one conversation or compatible run. Resolve it again when the endpoint,
+  credential, model, policy or requirements change. Failures after selection surface to the caller.
+  Discovery can establish specificity among published tags. Served-variant evidence is separate.
+- Invalid local arguments use `ConfigError` or the completion preflight's setting errors.
+  `ProviderSelectionError.reason` and `.evidence` expose bounded observations from failed selection.
+  Caller cancellation raises `Cancelled`. Deadline expiry raises `ProviderSelectionError` with
+  reason `deadline expired`. Operating-system DNS can delay return past the deadline.
+
 ## Deviations from NEL
 
 | # | Deviation |

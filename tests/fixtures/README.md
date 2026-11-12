@@ -273,3 +273,12 @@ behaviour are separate fields; a model that answered without calling verifies no
 Offline coverage: T1–T11 (`tests/test_tools.py`), L1–L13 (`tests/test_retry.py`), the VT harness
 against the fake (`tests/test_live_helpers.py`), and the installed-wheel tool smoke. None of these is
 live verification.
+
+
+### OpenRouter provider refactor v6
+
+Release verification uses `python3 scripts/verify_provider_refactor.py`.
+It retains the exact tested wheel, report and independent triage records by run ID.
+The refactor's paid live checks and AgentWiz retest are pending owner verification on
+the committed candidate using the rotated credential. The older captures above remain
+historical observations.

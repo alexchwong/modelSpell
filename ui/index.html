@@ -151,9 +151,19 @@
     <div class="inline"><input id="model" list="model-list"><button type="button" id="load-models">Load models</button></div>
     <datalist id="model-list"></datalist>
     <div id="provider-row">
-      <label for="provider">Provider (OpenRouter)</label>
-      <div class="inline"><select id="provider"><option value="">Any (OpenRouter routing)</option></select>
-        <button type="button" id="load-providers">Load providers</button></div>
+      <label for="provider-mode">Provider routing (OpenRouter)</label>
+      <select id="provider-mode"><option value="managed">OpenRouter-managed</option>
+        <option value="manual">Manual pin</option><option value="automatic">Automatic</option></select>
+      <div id="automatic-options">
+        <label for="provider-preset">Automatic preset</label>
+        <select id="provider-preset"><option value="balanced">Balanced</option>
+          <option value="cheapest">Cheapest</option><option value="fastest">Fastest</option></select>
+        <div id="balanced-options"><label for="balanced-floor">Balanced minimum tokens/s (optional)</label>
+          <input id="balanced-floor" type="number" min="0" step="any" placeholder="50"></div>
+      </div>
+      <div id="manual-options"><label for="provider">Provider pin</label>
+      <div class="inline"><select id="provider"><option value="">Choose a provider</option></select>
+        <button type="button" id="load-providers">Load providers</button></div></div>
     </div>
     <p id="settings-msg" class="hidden"></p>
     <div class="row" style="justify-content:flex-end">
@@ -189,7 +199,8 @@ function setStatus(text, error = false) { $("status").textContent = text; $("sta
 function renderState() {
   $("version").textContent = state.version ? "v" + state.version : "";
   const parts = [state.kind, state.base_url || "(default URL)", state.model || "(no model)"];
-  if (state.kind === "openrouter") parts.push("provider=" + (state.provider || "any"));
+  if (state.kind === "openrouter") parts.push(state.provider_mode === "manual" ? state.provider :
+    state.provider_mode === "automatic" ? "Automatic " + state.provider_preset : "OpenRouter-managed");
   parts.push(state.key_set ? "key: set" : "key: none");
   $("summary").textContent = parts.join(" · ");
 }
@@ -198,6 +209,10 @@ function syncDialogVisibility() {
   const kind = $("kind").value;
   $("base_url").placeholder = DEFAULT_URL[kind];
   $("provider-row").classList.toggle("hidden", kind !== "openrouter");
+  const mode = $("provider-mode").value;
+  $("manual-options").classList.toggle("hidden", mode !== "manual");
+  $("automatic-options").classList.toggle("hidden", mode !== "automatic");
+  $("balanced-options").classList.toggle("hidden", $("provider-preset").value !== "balanced");
 }
 
 // --- request panel -------------------------------------------------------------------------
@@ -256,6 +271,10 @@ function dialogConfig() {
   const kind = $("kind").value;
   const cfg = { kind, base_url: $("base_url").value.trim(), model: $("model").value.trim(),
     provider: kind === "openrouter" ? $("provider").value : "" };
+  cfg.provider_mode = kind === "openrouter" ? $("provider-mode").value : "managed";
+  cfg.provider_preset = $("provider-preset").value;
+  cfg.balanced_min_tps = cfg.provider_mode === "automatic" && cfg.provider_preset === "balanced"
+    && $("balanced-floor").value ? Number($("balanced-floor").value) : null;
   if ($("api_key").value) cfg.api_key = $("api_key").value; else if (clearKey) cfg.api_key = "";
   return cfg;
 }
@@ -265,11 +284,16 @@ function settingsMsg(text) { $("settings-msg").textContent = text; $("settings-m
 $("open-settings").onclick = () => {
   $("kind").value = state.kind; $("base_url").value = state.base_url || ""; $("model").value = state.model || "";
   $("api_key").value = ""; clearKey = false; $("key-state").textContent = state.key_set ? "(set)" : "(not set)";
+  $("provider-mode").value = state.provider_mode || "managed";
+  $("provider-preset").value = state.provider_preset || "balanced";
+  $("balanced-floor").value = state.balanced_min_tps ?? "";
   const p = $("provider"); p.length = 1;
   if (state.provider) p.add(new Option(state.provider, state.provider, true, true));
   settingsMsg(""); syncDialogVisibility(); $("settings").showModal();
 };
 $("kind").onchange = syncDialogVisibility;
+$("provider-mode").onchange = syncDialogVisibility;
+$("provider-preset").onchange = syncDialogVisibility;
 $("clear-key").onclick = () => { clearKey = true; $("api_key").value = ""; $("key-state").textContent = "(will be cleared)"; };
 
 $("load-models").onclick = async () => {
@@ -373,10 +397,15 @@ function renderGuard() {
   const p = (state.presets || {})[ocPreset()];
   if (!p) { $("oc-guard").textContent = ""; return; }
   const native = ocRoute() === "native";
+  const mode = state.kind === "openrouter" ? state.provider_mode : null;
+  const routing = mode === "manual" ? state.provider : mode === "automatic" ?
+    "Automatic " + state.provider_preset : "OpenRouter-managed";
+  const discovery = native || mode === "manual" || mode === "automatic";
   const caps = [...new Set(Object.values(p.max_tokens))].join("/");
   const parts = [`${state.kind} · ${native ? "native route" : "default route"} · ${state.model || "(no model)"}`
-    + (state.kind === "openrouter" ? ` · provider ${state.provider || "any"}` : ""),
-    `${ocPreset()}: ${p.calls} checks, ${p.requests} completion requests` + (native ? " + 1 discovery request" : ""),
+    + (mode ? ` · ${routing}` : ""),
+    `${ocPreset()}: ${p.calls} checks, ${p.requests} completion requests` + (discovery ? " + 1 discovery request" : "")
+      + (mode === "automatic" ? " + up to 4 confirmation POSTs" : ""),
     `max_tokens ${caps}`];
   if (p.padded_chars) parts.push(`padded prompt ${p.padded_chars.toLocaleString()} characters (≈${p.padded_tokens_approx.toLocaleString()} tokens)`);
   parts.push("cancelled requests may have been sent and billed");

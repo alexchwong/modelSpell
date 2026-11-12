@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from . import Acc, id_or_none, make_result, str_or_none
+from .._json import FrozenMap, thaw
 from .._reasoning import _reasoning_fragment, _text_fragment
 from .._usage import parse_cost, parse_usage
 from ..errors import BackendError, ResponseFormatError
@@ -38,7 +39,7 @@ def build_body(messages, model, *, reasoning, provider, settings, streaming, kin
             body[wire] = list(settings[arg]) if arg == "stop" else settings[arg]
     if kind == "openrouter":
         if provider is not None:
-            body["provider"] = dict(provider)
+            body["provider"] = thaw(provider) if isinstance(provider, FrozenMap) else dict(provider)
         if reasoning is not None:
             body["reasoning"] = {"effort": EFFORT[reasoning]}
     return body
@@ -50,7 +51,78 @@ def _usage_fields(raw, kind) -> dict:
                 raw_usage=dict(raw) if raw is not None else None)
 
 
+def _structure(doc):
+    """Record only fixed schema paths, types, and a recognised finish reason."""
+    structure = {}
+    choices = doc.get("choices")
+    if "choices" in doc:
+        structure["choices"] = type(choices).__name__
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    finish = choice.get("finish_reason")
+    for key in ("message", "delta", "finish_reason"):
+        if key not in choice:
+            continue
+        part = choice[key]
+        path = f"choices[0].{key}"
+        structure[path] = type(part).__name__
+        if isinstance(part, dict):
+            for field in ("content", "reasoning", "tool_calls", "reasoning_details"):
+                if field in part:
+                    structure[f"{path}.{field}"] = type(part[field]).__name__
+            calls = part.get("tool_calls")
+            if isinstance(calls, list) and calls and isinstance(calls[0], dict):
+                for field in ("index", "id", "type", "function"):
+                    if field in calls[0]:
+                        structure[f"{path}.tool_calls[0].{field}"] = type(calls[0][field]).__name__
+    known = ("stop", "length", "tool_calls", "function_call", "content_filter", "error")
+    return {"parser": "chat response rejected", "structure": structure or None,
+            "finish_reason": finish if finish in known else None}
+
+
+def _document_diagnostics(parser):
+    from functools import wraps
+
+    @wraps(parser)
+    def wrapped(doc, call, **kw):
+        try:
+            return parser(doc, call, **kw)
+        except ResponseFormatError as exc:
+            exc._diagnostic = _structure(doc)
+            provider = doc.get("provider")
+            exc._diagnostic["reported_provider"] = call.redact(provider)[:240] if isinstance(provider, str) else None
+            raise
+    return wrapped
+
+
+def _stream_diagnostics(parser):
+    from functools import wraps
+
+    @wraps(parser)
+    def wrapped(events, acc, call, **kw):
+        last = None
+
+        def track():
+            nonlocal last
+            for doc in events:
+                if isinstance(doc, dict) and doc.get("choices"):
+                    last = doc
+                yield doc
+
+        try:
+            return parser(track(), acc, call, **kw)
+        except ResponseFormatError as exc:
+            if last is not None and exc is not acc.callback_error:
+                exc._diagnostic = _structure(last)
+                provider = acc.meta.get("provider")
+                exc._diagnostic["reported_provider"] = call.redact(provider)[:240] if isinstance(provider, str) else None
+            raise
+    return wrapped
+
+
+@_document_diagnostics
 def parse_response(doc, call, *, kind, token_cap) -> object:
+    if kind == "openrouter" and _is_error(doc):
+        raise call.error(BackendError, "provider reported an error", status=200, body=json.dumps(doc))
     try:
         choice = doc["choices"][0]
         message = choice["message"]
@@ -78,10 +150,11 @@ def parse_response(doc, call, *, kind, token_cap) -> object:
 
 def _is_error(doc: dict) -> bool:
     choices = doc.get("choices")
-    return bool(doc.get("error")) or (isinstance(choices, list) and any(
+    return doc.get("error") is not None or (isinstance(choices, list) and any(
         isinstance(c, dict) and c.get("finish_reason") == "error" for c in choices))
 
 
+@_stream_diagnostics
 def parse_stream(events, acc: Acc, call, *, kind, token_cap) -> object:
     saw_event = saw_done = False
     details: list = []
@@ -216,6 +289,7 @@ def _replay_message(text: str, reasoning, details, calls: list[dict], kind: str)
     return message
 
 
+@_document_diagnostics
 def parse_tool_response(doc, call, *, kind):
     """A non-streamed tool turn: (Result, [assistant message] or None for a diagnostic turn)."""
     if _is_error(doc):
@@ -238,9 +312,8 @@ def parse_tool_response(doc, call, *, kind):
     calls = [_complete_call(call, c, f"tool_calls[{i}]") for i, c in enumerate(raw_calls or [])]
     _unique(call, calls)
     finish = choice.get("finish_reason")
-    if finish is None:
-        raise _bad(call, "missing finish_reason")
-    finish = str(finish)
+    if not _nonempty(finish):
+        raise _bad(call, "missing or invalid finish_reason")
     details = message.get("reasoning_details")
     details = list(details) if isinstance(details, list) else None
     result = make_result(
@@ -282,6 +355,7 @@ def _merge_fragment(call, calls: dict, frag) -> None:
         entry["arguments"].append(arguments)
 
 
+@_stream_diagnostics
 def parse_tool_stream(events, acc: Acc, call, *, kind):
     """A streamed tool turn: (Result, [assistant message] or None for a diagnostic turn)."""
     saw_event = saw_done = False
@@ -323,7 +397,9 @@ def parse_tool_stream(events, acc: Acc, call, *, kind):
                 acc.admit()
                 _merge_fragment(call, pending, frag)
         if choice.get("finish_reason") is not None:
-            acc.meta["finish_reason"] = str(choice["finish_reason"])
+            if not _nonempty(choice["finish_reason"]):
+                raise _bad(call, "invalid finish_reason")
+            acc.meta["finish_reason"] = choice["finish_reason"]
     if not saw_event:
         raise call.error(BackendError, "provider returned no SSE events")
     finish = acc.meta.get("finish_reason")

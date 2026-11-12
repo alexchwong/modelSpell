@@ -1,6 +1,7 @@
 """HTTP transport: per-call no-redirect opener, error mapping, redaction (spec §9)."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import email.utils
 import errno
 import functools
@@ -12,7 +13,8 @@ import socket
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 from ._cancel import _Watch
@@ -34,7 +36,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 class Call:
     """Per-call context used for requests and for building redacted errors."""
     url: str
-    key: str | None
+    key: str | None = field(repr=False)
     timeout: float
     model: str | None = None
     route: str | None = None  # "responses" | "lmstudio_native" | None
@@ -89,6 +91,23 @@ def _watched_connection(watch: _Watch, address, timeout=socket._GLOBAL_DEFAULT_T
     raise err if err is not None else OSError("getaddrinfo returned no addresses")
 
 
+_send_count: ContextVar[list[int] | None] = ContextVar("send_count", default=None)
+
+
+@contextmanager
+def count_posts():
+    """Count POST send starts in this context, including nested completion attempts."""
+    count = [0]
+    token = _send_count.set(count)
+    try:
+        yield count
+    finally:
+        _send_count.reset(token)
+        outer = _send_count.get()
+        if outer is not None:
+            outer[0] += count[0]
+
+
 class _WatchedConnectionMixin:
     def __init__(self, *args, watch: _Watch, **kwargs):
         super().__init__(*args, **kwargs)
@@ -107,6 +126,9 @@ class _WatchedConnectionMixin:
             self.connect()  # http.client connects inside send(); connect first so `sent` is exact
         if not self._watch.in_connect and not self._watch.sent:
             self._watch.begin_send()
+            count = _send_count.get()
+            if count is not None and self._method == "POST":
+                count[0] += 1
         return super().send(data)
 
 
@@ -178,13 +200,18 @@ def _http_error(call: Call, exc: urllib.error.HTTPError) -> ModelSpellError:
                "redirects are not followed — set base_url to the final URL")
         return call.error(BackendError, msg, status=code, body=body)
     if code in (401, 403):
-        return call.error(AuthError, f"authentication failed (HTTP {code}) for {call.url}: "
-                          f"{call.redact(body)[:1000]}", status=code)
+        error = call.error(AuthError, f"authentication failed (HTTP {code}) for {call.url}: "
+                           f"{call.redact(body)[:1000]}", status=code)
+        error._routing_reason = routing_reason(body)
+        return error
     if code in (404, 405) and call.route in _VERSION_HINT:
         return call.error(BackendError, f"HTTP {code} at {call.url}: {_VERSION_HINT[call.route]}",
                           status=code, body=body)
     error = call.error(BackendError, f"provider returned HTTP {code} for {call.model!r} at {call.url}: "
                        f"{call.redact(body)[:1000]}", status=code, body=body)
+    error._routing_reason = routing_reason(body)
+    if code in (400, 422) and error._routing_reason == "request validation":
+        error._routing_parameter = _routing_parameter(body)
     if code == 429:  # 0.4.0 §5: the origin stays private; only this path marks an error retryable
         error._transport_429 = _TRANSPORT_429
         error._retry_after = retry_after(exc.headers.get("Retry-After") if exc.headers else None)
@@ -262,3 +289,68 @@ def get_json(call: Call, extra_headers) -> Any:
         return read_json(call, response, dict_only=False)
     finally:
         response.close()
+
+
+def watched_get_json(call: Call, extra_headers, cancel) -> Any:
+    from ._cancel import _Stop
+    from .errors import Cancelled
+
+    watch = _Watch(cancel)
+    try:
+        with watch:
+            with _request(call, {"Accept": "application/json"}, None, extra_headers, watch) as response:
+                return read_json(call, response, dict_only=False, watch=watch)
+    except (ModelSpellError, _Stop) as exc:
+        if isinstance(exc, _Stop) or watch.cancelled_before_commit():
+            error = Cancelled()
+            error.sent = watch.sent
+            raise error from None
+        raise
+
+
+def routing_reason(body: str) -> str | None:
+    """Classify only structured fields. Never retain metadata or untrusted values."""
+    try:
+        error = json.loads(body).get("error")
+        metadata = error.get("metadata", {})
+        kind = error.get("error_type", error.get("type"))
+        scope = metadata.get("scope")
+        source = metadata.get("limit_source")
+    except (ValueError, AttributeError, RecursionError):
+        return None
+    if source in ("openrouter_guardrail_budget", "openrouter_workspace_budget", "openrouter_key_limit"):
+        return "budget"
+    if kind in ("moderation", "model_policy_violation", "policy_violation", "content_policy_violation", "refusal") or isinstance(metadata.get("reasons"), list):
+        return "moderation"
+    if kind == "guardrail" or isinstance(metadata.get("patterns"), list):
+        return "guardrail"
+    if kind in ("safety_retention", "safety_retention_required"):
+        return "safety retention"
+    if kind in ("access_denied", "permission_error"):
+        return "access"
+    if scope in ("model", "account") or kind in ("model_not_found", "account_not_found"):
+        return "model or account"
+    if (source in ("provider", "upstream_provider") or kind == "provider_rate_limit"
+            or (isinstance(metadata.get("provider_name"), str)
+                and metadata.get("provider_code") in (429, "429"))):
+        return "provider rate limit"
+    if kind in ("invalid_tool_replay", "invalid_tool_output", "missing_tool_call_id"):
+        return "replay validation"
+    if kind in ("unsupported_parameter", "invalid_parameter") or (
+            kind in ("invalid_request", "invalid_request_error", "unprocessable")
+            and isinstance(error.get("param", metadata.get("param")), str)):
+        field = error.get("param", metadata.get("param"))
+        if isinstance(field, str) and (field.startswith("messages.") or field.startswith("messages[")):
+            return "replay validation"
+        return "request validation"
+    return None
+
+
+def _routing_parameter(body: str) -> str | None:
+    try:
+        error = json.loads(body).get("error")
+        name = error.get("param", error.get("metadata", {}).get("param"))
+    except (ValueError, AttributeError, RecursionError):
+        return None
+    return name if name in ("max_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty",
+                            "presence_penalty", "frequency_penalty", "seed", "stop", "reasoning") else None

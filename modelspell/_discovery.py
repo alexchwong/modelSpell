@@ -105,19 +105,25 @@ def list_providers(endpoint: Endpoint, model_id: str, *, timeout: float = 15.0) 
         raise ConfigError("model_id must have the form 'author/slug'")
     if not endpoint._resolve_key():
         raise AuthError(f"no API key: set api_key or the {endpoint.api_key_env} environment variable")
+    return _providers(endpoint, model_id, timeout)
+
+
+def _providers(endpoint, model_id, timeout, cancel=None):
     author, slug = (urllib.parse.quote(p, safe=":-._~") for p in model_id.split("/", 1))
     call = _call(endpoint, f"{endpoint.base_url}/models/{author}/{slug}/endpoints", timeout)
+    doc = (_http.get_json(call, endpoint.headers) if cancel is None
+           else _http.watched_get_json(call, endpoint.headers, cancel))
     out = []
-    for row in _list(_http.get_json(call, endpoint.headers), "data", "endpoints"):
+    for row in _list(doc, "data", "endpoints"):
         if not isinstance(row, dict):
             continue
         name = next((v for v in (row.get("provider_name"), row.get("name")) if isinstance(v, str) and v), None)
-        if name is None:
+        if name is None and cancel is None:
             continue
         tag = row.get("tag")
         params = row.get("supported_parameters")
         out.append(ProviderInfo(
-            name=name, slug=tag if isinstance(tag, str) and tag else None,
+            name=name or "", slug=tag if isinstance(tag, str) and tag else None,
             context_length=_int(row.get("context_length")),
             max_completion_tokens=_int(row.get("max_completion_tokens")),
             quantization=_str(row.get("quantization")), pricing=_pricing(row.get("pricing")),

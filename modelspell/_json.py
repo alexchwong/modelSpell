@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 
 
@@ -20,7 +21,7 @@ class FrozenMap(Mapping):
     __slots__ = ("_d",)
 
     def __init__(self, items=()) -> None:
-        object.__setattr__(self, "_d", dict(items))
+        object.__setattr__(self, "_d", MappingProxyType(dict(items)))
 
     def __getitem__(self, key: str) -> Any:
         return self._d[key]
@@ -50,7 +51,7 @@ class FrozenMap(Mapping):
         return hash(frozenset(self._d.items()))
 
     def __repr__(self) -> str:
-        return f"FrozenMap({self._d!r})"
+        return f"FrozenMap({dict(self._d)!r})"
 
     def __copy__(self) -> "FrozenMap":
         return self
