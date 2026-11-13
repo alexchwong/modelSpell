@@ -14,6 +14,8 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 
+from .errors import ConfigError
+
 
 class FrozenMap(Mapping):
     """A read-only, hashable mapping with string keys, in insertion order."""
@@ -115,6 +117,34 @@ def thaw(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [thaw(v) for v in value]
     return value
+
+
+def _standard_json(value: Any) -> Any:
+    """Convert a snapshot to plain containers and standard JSON numbers."""
+    if isinstance(value, Decimal):
+        value = float(value)
+        if not math.isfinite(value):
+            raise JSONValueError("number exceeds the finite float range")
+    if isinstance(value, Mapping):
+        return {k: _standard_json(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_standard_json(v) for v in value]
+    return value
+
+
+def _prepare_provider(provider: Mapping[str, Any] | None) -> dict | None:
+    """Snapshot and verify an ordinary OpenRouter policy before request construction."""
+    if provider is None:
+        return None
+    try:
+        policy = _standard_json(freeze(provider))
+        json.dumps(policy, allow_nan=False)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        pass
+    else:
+        return policy
+    # The validation error can contain caller data. Do not attach it to ConfigError.
+    raise ConfigError("provider must be a JSON object with string keys and encodable JSON values")
 
 
 def dumps(value: Any) -> str:

@@ -1,5 +1,10 @@
 # NEWS
 ## 0.4.0
+- Added offline `check_completion()` for ordinary targets, generation settings, provider policies and transport options.
+- Timeouts require (0, 1,000,000] seconds. Retry waits allow zero with the same upper bound.
+- Ordinary provider policies reject non-string keys and unsupported numeric subclasses.
+- Ordinary policies normalize nested mappings and tuples and convert finite Decimals to floats.
+- Integer generation settings that exceed Python's active JSON digit limit raise `ConfigError` before sending.
 - OpenRouter provider selection adds Managed, Manual pin and Automatic routing with Cheapest, Balanced and Fastest presets.
 - Internal HTTP request representations redact the API key.
 - New `complete_with_tools()`: offer functions, receive complete calls, return results under the original call IDs.

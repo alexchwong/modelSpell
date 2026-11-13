@@ -5,6 +5,7 @@ import urllib.parse
 from typing import Any
 
 from . import _http
+from ._timing import _check_timeout
 from ._types import Endpoint, ModelInfo, Pricing, ProviderInfo
 from .errors import AuthError, ConfigError, ResponseFormatError, UnsupportedOperation
 
@@ -46,8 +47,7 @@ def _model(id, raw, **kw) -> ModelInfo:
 
 
 def _call(endpoint: Endpoint, url: str, timeout: float, route: str | None = None) -> _http.Call:
-    if not (isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0):
-        raise ConfigError("timeout must be a number > 0")
+    _check_timeout(timeout)
     return _http.Call(url=url, key=endpoint._resolve_key(), timeout=timeout, route=route)
 
 
@@ -103,14 +103,14 @@ def list_providers(endpoint: Endpoint, model_id: str, *, timeout: float = 15.0) 
         raise UnsupportedOperation("list_providers is only supported on openrouter")
     if not isinstance(model_id, str) or "/" not in model_id or not all(model_id.split("/", 1)):
         raise ConfigError("model_id must have the form 'author/slug'")
-    if not endpoint._resolve_key():
-        raise AuthError(f"no API key: set api_key or the {endpoint.api_key_env} environment variable")
     return _providers(endpoint, model_id, timeout)
 
 
 def _providers(endpoint, model_id, timeout, cancel=None):
     author, slug = (urllib.parse.quote(p, safe=":-._~") for p in model_id.split("/", 1))
     call = _call(endpoint, f"{endpoint.base_url}/models/{author}/{slug}/endpoints", timeout)
+    if not call.key:
+        raise AuthError(f"no API key: set api_key or the {endpoint.api_key_env} environment variable")
     doc = (_http.get_json(call, endpoint.headers) if cancel is None
            else _http.watched_get_json(call, endpoint.headers, cancel))
     out = []

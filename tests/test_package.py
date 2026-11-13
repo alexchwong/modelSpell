@@ -38,7 +38,7 @@ TOOL_TURN_PROPERTIES = ["clean", "replay", "result", "route_identity", "tool_cal
 def test_k1_public_api():
     assert modelspell.__all__ == [
         "complete", "complete_with_tools", "list_models", "list_providers", "supported_settings", "check_settings",
-        "check_tool_request",
+        "check_completion", "check_tool_request",
         "Endpoint", "Message", "Result", "Usage", "ModelInfo", "ProviderInfo", "Pricing",
         "ToolDefinition", "ToolCall", "ToolTurn", "ToolOutput", "RetryEvent",
         "CancelHandle", "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",

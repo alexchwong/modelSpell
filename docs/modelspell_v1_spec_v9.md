@@ -3,7 +3,7 @@
 **Status:** Implemented (package 0.4.0); live tool-route evidence pending (§17, VT). The live verifications (§17) and owner checks (§18.4) are recorded in `tests/fixtures/README.md`; no code depends on their outcome at runtime.
 **Date:** 11 November 2026
 **Package:** modelSpell. Distribution (display) name `modelSpell`; import name `modelspell`. pip normalises distribution names, so `modelSpell` and `modelspell` name the same distribution. Licensed under MIT. Released only as a wheel on GitHub releases (§18); not published to PyPI.
-**Version:** spec v9, superseding `modelspell_v1_spec_v8.md` (kept in `docs/` as history). v9 is package 0.4.0. It folds in the *modelSpell 0.4.0 proposal* (version 4, 11 November 2026): client-executed function calling through `complete_with_tools()` and `check_tool_request()` (§21), and opt-in HTTP 429 recovery on both completion entry points (§6.11). Its decisions are listed in §22. v8 was package 0.3.0. It folds in the *modelSpell 0.3.0 technical specification* (version 4, 2 November 2026): cancellation from another thread through a `CancelHandle` (§6.10, §8.10, §9.6; M30-1–M30-7, M30-15), usage while streaming (§17, M30-8), the owner-check battery (§18.4; M30-10, M30-16–M30-21) and the developer UI's Stop through the handle and owner-check section (§18.3, M30-11). Its decisions are listed in §20. v7 was package 0.2.1. v7 folded in the *modelSpell 0.2.1 technical specification* (version 6, 28 October 2026): `top_p` on LM Studio Responses (M21-1) by the referenced Responses documentation (M21-2); no release decision depends on model output (M21-3); refusal message guidance (M21-5); the LM Studio probe diagnostic (M21-6). Its decisions are listed in §19. v6 folded in the *modelSpell 0.2.0 technical specification* (version 3, 27 October 2026): the generation settings — eight new `complete()` arguments, the per-route support and range tables, `supported_settings()` and `check_settings()` (§3, §6.1, §6.7–§6.9, §7), their tests (§12.3, §12.8), verification V2 (§17) and the developer UI's request panel (§18.3). v5 added the naming, version file, license, release and developer-UI requirements; v4 is the original library contract. Review decisions and change maps are in `docs/modelspell_design_history.md`. That document is informative and not part of this contract.
+**Version:** spec v9, superseding `modelspell_v1_spec_v8.md` (kept in `docs/` as history). v9 is package 0.4.0. It folds in the *modelSpell 0.4.0 proposal* (version 4, 11 November 2026): client-executed function calling through `complete_with_tools()` and `check_tool_request()` (§21), and opt-in HTTP 429 recovery on both completion entry points (§6.11). Its decisions are listed in §22. This edition includes configuration refactor v4 in §6, §7.1 and §10. v8 was package 0.3.0. It folds in the *modelSpell 0.3.0 technical specification* (version 4, 2 November 2026): cancellation from another thread through a `CancelHandle` (§6.10, §8.10, §9.6; M30-1–M30-7, M30-15), usage while streaming (§17, M30-8), the owner-check battery (§18.4; M30-10, M30-16–M30-21) and the developer UI's Stop through the handle and owner-check section (§18.3, M30-11). Its decisions are listed in §20. v7 was package 0.2.1. v7 folded in the *modelSpell 0.2.1 technical specification* (version 6, 28 October 2026): `top_p` on LM Studio Responses (M21-1) by the referenced Responses documentation (M21-2); no release decision depends on model output (M21-3); refusal message guidance (M21-5); the LM Studio probe diagnostic (M21-6). Its decisions are listed in §19. v6 folded in the *modelSpell 0.2.0 technical specification* (version 3, 27 October 2026): the generation settings — eight new `complete()` arguments, the per-route support and range tables, `supported_settings()` and `check_settings()` (§3, §6.1, §6.7–§6.9, §7), their tests (§12.3, §12.8), verification V2 (§17) and the developer UI's request panel (§18.3). v5 added the naming, version file, license, release and developer-UI requirements; v4 is the original library contract. Review decisions and change maps are in `docs/modelspell_design_history.md`. That document is informative and not part of this contract.
 **Audience:** a coding agent implementing the package from scratch. Every behaviour needed is stated here. Where this document and your intuition disagree, follow this document.
 
 **0.2.1 addition (29 October 2026):** `complete()` accepts a `ModelInfo` as `model` (M21-7); on the LM Studio native route a model with no reasoning configuration gets no `reasoning` field (M21-8). This additive API change means 0.2.1 is no longer API-identical to 0.2.0.
@@ -87,7 +87,7 @@ Everything below is exported from `modelspell/__init__.py` and listed in `__all_
 from modelspell import (
     # functions
     complete, complete_with_tools, list_models, list_providers, supported_settings, check_settings,
-    check_tool_request,                                   # v9, §21
+    check_completion, check_tool_request,                # §6.9, §21
     # types
     Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing,
     ToolDefinition, ToolCall, ToolTurn, ToolOutput,       # v9, §21.2
@@ -96,7 +96,7 @@ from modelspell import (
     # errors
     ModelSpellError, ConfigError, UnsupportedSetting, UnsupportedOperation,
     AuthError, ConnectError, RequestTimeout, BackendError, ResponseFormatError,
-    Cancelled,
+    Cancelled, choose_provider, ProviderSelection, ProviderSelectionError,
 )
 ```
 
@@ -231,11 +231,11 @@ All arguments after `input` are keyword-only; their order is not significant. **
 | the eight sampling arguments | §6.8.1 value checks, §6.7 route support, §6.8.2 route ranges | `ConfigError` / `UnsupportedSetting` |
 | `provider` | `None`, or a mapping, and only when `kind == "openrouter"` | `UnsupportedSetting` on other kinds |
 | `extra` | `None` or a mapping; must not contain the keys `model` or `stream` | `ConfigError` |
-| `timeout` | number > 0 | `ConfigError` |
+| `timeout` | non-boolean integer or finite float in (0, 1,000,000] seconds | `ConfigError` |
 | `on_text`, `on_reasoning` | `None` or callable | `ConfigError` |
 | `cancel` (v8) | `None` or a `CancelHandle` (§6.10) | `ConfigError`: `cancel must be None or a CancelHandle` |
 | `rate_limit_retries` (v9) | `int` from 0 to 3, not `bool` | `ConfigError` |
-| `max_retry_wait` (v9) | finite number ≥ 0, not `bool` | `ConfigError` |
+| `max_retry_wait` (v9) | non-boolean integer or finite float in [0, 1,000,000] seconds | `ConfigError` |
 | `on_retry` (v9) | `None` or callable; checked last | `ConfigError` |
 | `input` entries (v9) | `ToolTurn` and `ToolOutput` are refused before sending | `ConfigError` naming `complete_with_tools()` |
 
@@ -264,7 +264,7 @@ There is **no fallback** between routes, and no fallback from streaming to non-s
 
 ### 6.4 `extra` merge and the effective token cap
 
-After the route builds its body, `extra` is applied as a shallow top-level `dict.update`. It may override any key except `model` and `stream`, which §6.1 rejects. That includes keys the route sets from public arguments, such as `max_tokens` / `max_output_tokens`, `temperature`, `reasoning`, `provider` and `store`. This is intended: it is the escape hatch for backend-specific behaviour (G8).
+After the route builds its body, `extra` is applied as a shallow top-level `dict.update`. It may override any key except `model` and `stream`, which §6.1 rejects. That includes keys the route sets from public arguments, such as `max_tokens` / `max_output_tokens`, `temperature`, `reasoning`, `provider` and `store`. This is the escape hatch for backend-specific behaviour (G8). Replacing `provider` replaces the entire object, including any typed pin or privacy flags. The preflight covers typed fields only. AgentWiz passes typed profile settings without forwarding user-configured `extra`.
 
 **Defaults and raw overrides.** The request bodies in §7 are ModelSpell's defaults. Statements elsewhere in this spec about what a body contains ("sent by default", "never adds") describe those defaults and hold unless `extra` overrides them. `extra` is a raw escape hatch:
 
@@ -324,7 +324,7 @@ In v6 the README example also shows one advanced setting (for example `top_k` on
 | `frequency_penalty` | — | — | `frequency_penalty` | `frequency_penalty` |
 | `seed` | — | — | `seed` | `seed` |
 | `stop` | — | — | `stop` (array) | `stop` (array) |
-| `provider` | — | — | `provider` (mapping, verbatim) | — |
+| `provider` | — | — | `provider` (mapping, normalized JSON) | — |
 
 "—" means refused: a valid non-`None` value raises `UnsupportedSetting` before any network I/O (§6.7.2). An invalid value can raise `ConfigError` first, under the order of checks in §6.8.4. The table is the library's send-and-validate contract. It is not a claim about what any server applies (§6.7.3). `extra` remains an unvalidated escape hatch that can add or override any field except `model` and `stream`. It never changes the route and establishes nothing about server support.
 
@@ -345,7 +345,7 @@ A non-`None` argument that the route does not support raises `UnsupportedSetting
 
 modelSpell guarantees only that a supported setting is **sent** under the right name. Whether the model applies it is up to the backend, the model and, on OpenRouter, the provider:
 
-- **OpenRouter.** By default, a provider that does not support a parameter ignores it, with no error; pinning a provider and disabling fallbacks does not change this. `"require_parameters": true` in `provider=` makes OpenRouter route only to providers that declare support for every parameter in the request. That establishes declared support, not proof that every sampler changes every model's output. modelSpell passes `provider` verbatim and adds nothing to it (M2-8).
+- **OpenRouter.** By default, a provider that does not support a parameter ignores it, with no error; pinning a provider and disabling fallbacks does not change this. `"require_parameters": true` in `provider=` makes OpenRouter route only to providers that declare support for every parameter in the request. That establishes declared support, not proof that every sampler changes every model's output. Ordinary completion normalizes the supplied policy as in §7.1 and adds no flags (M2-8).
 - **`openai_compat`.** A server that does not know a field may refuse it or ignore it.
 - **LM Studio native.** Behaviour for a model that cannot use a setting is undocumented.
 - **LM Studio Responses** (v7). LM Studio accepts fields without error whether or not it uses them, so neither acceptance nor modelSpell's support says a setting is applied.
@@ -354,7 +354,7 @@ Nothing modelSpell returns claims a setting was applied. The README states this.
 
 ### 6.8 Setting checks (added in v6)
 
-All checks run before key resolution and before any network I/O, through the same path as other validation errors, so redaction (§9.3) is unaffected. They are implemented once: `check_settings()` exposes them, and `complete()` calls the same code.
+All checks run before key resolution and before any network I/O, through the same path as other validation errors, so redaction (§9.3) is unaffected. The generation checks are shared by the preflights and completion functions.
 
 #### 6.8.1 Value checks (every route)
 
@@ -391,11 +391,11 @@ Ranges a backend documents for its route, checked only on that route. A value ou
 
 #### 6.8.3 Finiteness
 
-Every numeric setting must be finite: `temperature` and the new numeric arguments. Infinity and NaN raise `ConfigError` before sending. (0.1.0 accepted `temperature=inf`, because `inf >= 0`, and `json.dumps` then wrote `Infinity`, which is not valid JSON.) `max_tokens`, `top_k` and `seed` are integers, which are always finite.
+Every numeric setting must be finite: `temperature` and the new numeric arguments. Infinity and NaN raise `ConfigError` before sending. (0.1.0 accepted `temperature=inf`, because `inf >= 0`, and `json.dumps` then wrote `Infinity`, which is not valid JSON.) Integer generation values also have to fit Python's active decimal digit limit. Both encoders use `int.__repr__`. When it raises `ValueError`, the shared checks raise `ConfigError` naming the setting without attaching the underlying exception.
 
 #### 6.8.4 Order of checks
 
-**The setting checks**, shared by `check_settings()` and `complete()`:
+**The route and generation checks** shared by ordinary and tool entry points and selection:
 
 1. `kind` is one of the three kinds (`ConfigError`).
 2. `reasoning` is `None` or one of the four literals (`ConfigError`), and is `None` for `openai_compat` (`UnsupportedSetting`).
@@ -403,14 +403,15 @@ Every numeric setting must be finite: `temperature` and the new numeric argument
 4. For each generation setting that is not `None`, in the order `max_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`:
    1. the value check (§6.8.1);
    2. if the route does not support it, `UnsupportedSetting` (§6.7.2);
-   3. the route range check (§6.8.2).
+   3. the route range check (§6.8.2);
+   4. the integer encoding check (§6.8.3).
 5. `provider` is given only for `openrouter` (`UnsupportedSetting`), and is a mapping (`ConfigError`).
 
 So for each argument the value check comes before support: a malformed value is reported as malformed even on a route that would refuse the argument anyway, which keeps the error stable when the caller changes route.
 
-**`complete()`'s validation** runs, in order: the `endpoint` and `model` checks; the setting checks above with `kind = endpoint.kind`; then the `extra`, `timeout`, callback and (v8) `cancel` checks. Then it resolves the key (§4.2, which may raise `AuthError`). (v8) Only then does it check the handle: an already-cancelled handle raises `Cancelled(sent=False)` before any socket is created (M30-7). Then it sends.
+**Ordinary completion validation.** `check_completion()` and `complete()` check the endpoint type and model ID, run the route and generation checks above, prepare the typed provider policy (§7.1), and validate timeout, retry count and retry wait, in that order. `complete()` then checks `extra`, callbacks, `cancel`, `on_retry` and messages, and resolves the key (§4.2). An already-cancelled handle raises `Cancelled(sent=False)` after pre-send validation and before socket creation (M30-7).
 
-### 6.9 `supported_settings()` and `check_settings()` (added in v6)
+### 6.9 Offline preflights and `supported_settings()`
 
 ```python
 def supported_settings(
@@ -425,9 +426,16 @@ def check_settings(
     repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None,
     provider=None,
 ) -> None   # parameter types as in complete()
+
+def check_completion(
+    endpoint: Endpoint, model: str | ModelInfo, *,
+    reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None,
+    repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None,
+    provider=None, timeout=900.0, rate_limit_retries=0, max_retry_wait=30.0, **unknown,
+) -> None   # parameter types as in complete()
 ```
 
-Both are **pure**: no endpoint, no network, no environment, no state. Both take a `kind` string, so a caller can ask before building an endpoint or resolving a key.
+All three preflights run without credential lookup, environment access, discovery or network calls. `supported_settings()` and `check_settings()` take a kind string and can run before an endpoint is built.
 
 **`supported_settings()`** returns the names of the generation settings modelSpell accepts and sends on the route chosen by this `kind` and `reasoning`. A call that passes any other generation setting as non-`None` raises `UnsupportedSetting`. It never contains `endpoint`, `model`, `input`, `extra`, `timeout`, `on_text` or `on_reasoning`, which are always accepted. It says nothing about whether a model, provider or server applies a setting. It raises exactly what `complete()` would for the same `kind` and `reasoning`: `ConfigError` for an unknown value, `UnsupportedSetting` for `openai_compat` with a reasoning value.
 
@@ -438,9 +446,13 @@ Both are **pure**: no endpoint, no network, no environment, no state. Both take 
 | `openrouter` | any | `chat_completions` | `{reasoning, max_tokens, temperature, provider, top_p, top_k, min_p, repetition_penalty, presence_penalty, frequency_penalty, seed, stop}` |
 | `openai_compat` | `None` | `chat_completions` | `{max_tokens, temperature, top_p, top_k, min_p, presence_penalty, frequency_penalty, seed, stop}` |
 
-**`check_settings()`** runs exactly the setting checks of §6.8.4, from the same code `complete()` uses, and raises the same exception with the same message; it returns `None` when every check passes. It does not build or validate an `Endpoint` (so the base URL is not checked), does not check `model`, `input`, `extra`, `timeout` or the callbacks, and never resolves a key, so it never raises `AuthError`. A pass means `complete()` will not refuse those settings; `complete()` can still raise for anything outside them (an invalid endpoint, a missing OpenRouter key, `extra`, or any error after sending).
+**`check_settings()`** checks the route, generation values and typed provider JSON using the same code as `complete()`. Its scope is limited to those settings.
 
-*Why it exists.* A caller that streams `complete()`'s output over HTTP has usually committed its response status before `complete()` runs. `supported_settings()` gives only names and cannot see `temperature=3` on OpenRouter; `check_settings()` lets the caller run every setting check first and answer HTTP 400 before streaming.
+**`check_completion()`** checks the resolved target and all typed configuration shared with `complete()`, including transport options. It rejects the first unknown keyword in sorted order with `ConfigError` before validating typed values. This includes call-only options such as input, callbacks, cancellation, `extra` and tools. An unknown keyword on `complete()` still raises `TypeError`.
+
+**`check_tool_request()`** checks kind, generation settings, tool definitions, the tool provider policy and retry limits (§21.1). Timeout and transcript validation are part of the tool call.
+
+Each preflight returns `None` on success and raises the same exception type and message as its completion entry point for shared invalid arguments. The host handles server acceptance, model-specific requirements and permission to send. A host can preflight before committing an HTTP status or invoking provider selection (§10.4).
 
 ### 6.10 Cancellation handle (added in v8)
 
@@ -517,6 +529,7 @@ Every streamed fragment passes an **admission point** before it is added to the 
 
 - **What is retried.** Only a genuine transport HTTP 429 to the current attempt's POST, before any response body is read, so before any model output or callback. The origin is an identity marker set only by `_http.py`'s HTTP-error mapping; a callback raising `BackendError(status=429)`, or a streamed error event carrying a 429-like code, is never retried. Every other HTTP status, malformed responses, timeouts, connection failures and uncertain outcomes propagate on the first attempt. Exhaustion raises the last redacted `BackendError(status=429)`. `complete_with_tools()` retries the model request only; executing tool calls is the caller's.
 - **Waiting.** Before attempt *n* + 1 the delay is the greater of the nominal backoff (1, 2, then 4 seconds) and a valid `Retry-After` (non-negative integer delta-seconds, or an HTTP-date relative to now; a past date counts as 0). A malformed, empty or over-64-character header uses the nominal backoff. `max_retry_wait` caps the cumulative wait between attempts: if the next delay would exceed the remaining allowance, the last 429 is raised at once without waiting. `max_retry_wait=0` therefore makes no retries.
+- **Bounds.** Timeouts accept non-boolean integers or finite floats greater than zero and at most 1,000,000 seconds. Retry wait accepts the same types and upper bound and permits zero. Explicit `None` is invalid for all three transport options.
 - **Timeout.** Every attempt gets the original `timeout` (default 900 s) with the semantics of §9.4. A run deadline remains the caller's, through a `CancelHandle`.
 - **Cancellation.** The backoff wait is interruptible through `CancelHandle`: `cancel()` wakes it at once and the call raises `Cancelled`. `Cancelled.sent` is `True` if any attempt may have sent bytes. Cancellation before a later attempt connects behaves as §6.10 for that attempt. Retry state is per invocation; concurrent calls share nothing.
 - **`on_retry`.** Called with a frozen `RetryEvent(attempt, next_attempt, delay, status)` before each wait: one-based attempt numbers, `delay` in seconds, `status` the HTTP status (429). The event describes a scheduled retry, which may still be cancelled before it is sent. An exception from `on_retry` propagates unchanged and nothing more is sent; a `Cancelled` it raises gets `partial` and `sent` as for a callback.
@@ -548,7 +561,7 @@ for arg, wire in FIELDS[kind].items():   # openrouter: 10 fields; openai_compat:
     if settings[arg] is not None:
         body[wire] = list(settings[arg]) if arg == "stop" else settings[arg]
 # openrouter only:
-if provider is not None:    body["provider"] = dict(provider)      # verbatim
+if policy is not None:      body["provider"] = policy              # prepared JSON payload
 if reasoning is not None:   body["reasoning"] = {"effort": EFFORT[reasoning]}
 ```
 
@@ -556,7 +569,7 @@ if reasoning is not None:   body["reasoning"] = {"effort": EFFORT[reasoning]}
 
 OpenRouter accepts `none` as an effort value and treats it as reasoning disabled. NEL's `"none"` setting produced exactly `{"effort": "none"}`.
 
-`provider` is passed through verbatim. Callers who already know an exact provider or endpoint slug pass it directly, for example `provider={"order": ["deepinfra/turbo"]}`, without calling `list_providers()`.
+For ordinary requests, a typed `provider` mapping is deep-snapshotted before request construction. Nested mappings become dicts with string keys in their original order and tuples become JSON arrays. Finite `Decimal` values convert to finite floats at standard JSON precision. Cycles, unsupported types or numeric subclasses, non-string keys, non-finite numbers and other standard JSON encoding failures raise the same fixed `ConfigError` without attaching the underlying validation exception. An omitted policy stays omitted and an empty mapping sends an empty object. Endpoint tags are preserved verbatim. A known slug can be passed directly, for example `provider={"order": ["deepinfra/turbo"]}`. Tool requests use the exact encoder (§21.4).
 
 ### 7.2 LM Studio Responses (`lmstudio`, reasoning `None`/`low`/`medium`/`high`)
 
@@ -1050,6 +1063,8 @@ A `ModelInfo` returned by `list_models()` for the same endpoint may be passed as
 
 ### 10.2 `list_models(endpoint, *, timeout: float = 15.0) -> list[ModelInfo]`
 
+Both discovery functions validate timeout using §6.11's bounds before credential resolution.
+
 This is a GET with `Accept: application/json`, plus `Authorization` if a key resolves, plus `endpoint.headers`. It is sent through the same no-redirect opener (§9.5). The 15 s default is NEL's `CATALOGUE_TIMEOUT`. The result is a new `list`, sorted by `id`. Entries with a duplicate `id` are dropped; the first wins.
 
 | `kind` | URL | Parsing |
@@ -1079,6 +1094,14 @@ Failures raise the §9 errors, and nothing is cached. If a mandatory field such 
 **`slug is None` never blocks routing.** Callers can always pass an identifier they know directly in `provider=` (§7.1).
 
 (Deviation: NEL listed OpenRouter's global `/providers` catalogue, which does not answer "which providers serve this model".)
+
+### 10.4 OpenRouter provider selection
+
+`choose_provider()` takes a model ID string and the intended generation settings. It validates the selection timeout, settings and base policy before discovery or probes. It uses §7.1's JSON policy preparation, including when `tools=True`, then applies selection-mode rules and the relevant pin checks. Each probe validates its effective policy through the corresponding completion API. OpenRouter remains authoritative on eligibility. The default selection deadline is 30 seconds, with the same timeout bounds as discovery and completion. Manual can call discovery, and Automatic can send up to four synthetic probes under its own attempt budget.
+
+For an ordinary request, the host authorizes network access and spending, preflights the base policy and all typed completion options, and then optionally selects a provider. Pass the effective `selection.policy` directly to `complete()` with the original generation and transport options. Keep selection and completion budgets separate. For a compatible run, preflight and select once as shown in `examples/batch_selection.py`.
+
+Record `selection.slug` as the requested endpoint tag when present, and `Result.provider` as the provider label reported by the real completion. Automatic selection evidence can also contain a provider label reported by a probe. For serialization of the immutable effective policy, use `json.dumps(selection.policy, default=dict)`.
 
 ---
 
@@ -1217,7 +1240,7 @@ Minimum fixture set per route:
 | R13 | Route ranges (§6.8.2): OpenRouter `temperature` and `repetition_penalty` 2 accepted, 2.01 refused; `presence_penalty`/`frequency_penalty` ±2 accepted, ±2.01 refused; LM Studio native `temperature` 1 accepted, 1.01 refused; LM Studio Responses and `openai_compat` `temperature` 5 accepted. |
 | R14 | `supported_settings()` equals the §6.9 table for every `kind` × `reasoning`; for each combination every name in the set is accepted by `complete()` and reaches the body, and every generation setting not in it raises `UnsupportedSetting`; an unknown `kind`, an unknown `reasoning`, and `openai_compat` with a reasoning value raise as `complete()` does; no network call, no environment read. |
 | R15 | `stop` given as a `tuple` is sent as a JSON array in the same order. |
-| R16 | `check_settings()` agrees with `complete()`: every refusing case of R10–R13 raises the same exception class and message from both; every accepting case of R10–R14 returns `None`; no network or environment: an OpenRouter case with no key passes `check_settings()` while `complete()` raises `AuthError`. |
+| R16 | `check_completion()` and `check_settings()` agree with `complete()` on R10–R13: matching exception types and messages on refusal, and `None` from the preflights on success. An OpenRouter configuration with no key passes both preflights with sockets, environment access and credential lookup blocked. |
 | R17 | `ModelInfo` as model, streaming and non-streaming: (a) native `reasoning="off"` with options `None` or `()` omits only `reasoning`, retaining id and `store: false` (MSGS and G3 parity); (b) options `("off", "on")` or `("on",)` retain `reasoning: "off"`, matching string-model bodies; (c) `top_k=20`, `min_p=0.05`, `repetition_penalty=1.1` send native fields including `repeat_penalty`, without reasoning for absent options; (d) LM Studio reasoning `None`/`"low"`, OpenRouter and `openai_compat` reasoning `None` have identical URL/body to string `"m"`; (e) empty/non-string ModelInfo ids, `123` and `None` raise `ConfigError` with §6.1's model message and zero requests. Native HTTP 500 errors name the id, not the ModelInfo repr; Responses `top_k=1` refusal matches the string-model message. |
 
 ### 12.4 Response parsing
@@ -1283,7 +1306,7 @@ Minimum fixture set per route:
 |---|---|
 | K1 | Public API snapshot: `modelspell.__all__` equals the exact list in §3 (in v6, `supported_settings` and `check_settings` follow `list_providers`; in v8, `CancelHandle` follows `Pricing`), and the dataclass field names of every public type equal the lists in this spec. Private module names and signatures (§11) are not snapshotted. |
 | K2 | `import modelspell` under a patched `socket.socket` that raises on use: the import succeeds, so it makes no network calls. |
-| K3 | Build the wheel and `pip install` it into a clean venv with no other packages. Then run `python -c "import modelspell; print(modelspell.__all__)"` and `scripts/smoke_installed.py`, which starts an inline `http.server` stub and makes one `complete()` call against it. Before that call, the script removes the proxy variables from its own environment (as in §12.1), so a CI proxy cannot intercept the localhost request. Runs in CI. |
+| K3 | Build the wheel and `pip install` it into a clean venv with no other packages. Then run `python -c "import modelspell; print(modelspell.__all__)"` and `scripts/smoke_installed.py`, which starts an inline `http.server` stub and exercises ordinary completion, two tool turns and OpenRouter preflight before selection. The script first removes the proxy variables from its own environment (as in §12.1), so a CI proxy cannot intercept the localhost request. Runs in CI. |
 | K4 | Concurrency: 16 threads call `complete()` against the test server, each with a distinct prompt echoed back in the response. Every result matches its own prompt. (v8) Repeated with one shared `CancelHandle` that is never cancelled. |
 | K5 | A `grep`-style test: there are no imports outside the standard library in the `modelspell/` sources, and `urlopen` is not called. |
 | K6 | `hash()` succeeds for an instance of every public dataclass type, with its dict-valued fields populated. Equality still compares those fields. |
@@ -1575,7 +1598,7 @@ This section governs repository tooling around the package. None of it changes l
 
 - **The only release artifact is the wheel** `modelspell-X.Y.Z-py3-none-any.whl`, attached to GitHub release `vX.Y.Z`. No curated source zip is produced. GitHub's automatic source archives exist but are not a supported install channel.
 - **Wheel contents** are fixed by `packages = ["modelspell"]`: exactly `modelspell/**`, `METADATA`, `WHEEL`, `RECORD` and `licenses/LICENSE` (K7). The sdist target is restricted to `modelspell/`, `pyproject.toml`, `README.md` and `LICENSE`, so tests, the UI, scripts and docs never ship in either form.
-- **`scripts/build_release.py`** builds from `git archive HEAD` (uncommitted edits are excluded and reported), requires a `## X.Y.Z` heading in `NEWS.md`, verifies the wheel's contents and metadata exactly, and with `--smoke` installs the wheel into a fresh venv and runs `scripts/smoke_installed.py` (v9: one `complete()` call and a two-turn `complete_with_tools()` exchange against an inline stub). It prints the wheel path and sha256. `--changed-since TAG` exits 1 when any shipped file (`modelspell/`, `pyproject.toml`, `README.md`, `LICENSE`) changed since `TAG`.
+- **`scripts/build_release.py`** builds from `git archive HEAD` (uncommitted edits are excluded and reported), requires a `## X.Y.Z` heading in `NEWS.md`, verifies the wheel's contents and metadata exactly, and with `--smoke` installs the wheel into a fresh venv and runs `scripts/smoke_installed.py` (K3). It prints the wheel path and sha256. `--changed-since TAG` exits 1 when any shipped file (`modelspell/`, `pyproject.toml`, `README.md`, `LICENSE`) changed since `TAG`.
 - **Branches:** development on `devel`; `main` receives merges from `devel`.
 - **`.github/workflows/tests.yml`** runs the offline suite on Python 3.10 and 3.13 on pushes to `devel` and `main`, on pull requests, and when called by the release workflow.
 - **`.github/workflows/release.yml`** runs on pushes to `main` and by manual dispatch. It runs `tests.yml` first. If release `vX.Y.Z` does not exist, it runs `build_release.py --smoke` and creates the release with the wheel attached; the notes are the `NEWS.md` section plus a pinned install line with the sha256. If the release exists, it fails when `build_release.py --changed-since vX.Y.Z` reports shipped-file changes (a version bump is required), and otherwise does nothing.
@@ -1597,7 +1620,7 @@ The UI exists to exercise the library by hand. It lives in top-level `ui/`, runs
 - **Routes:**
   - `GET /api/state` returns the connection settings, `key_set`, `version` and `supported`: for each reasoning level the saved `kind` allows, the sorted names from `supported_settings(kind, level)`; the key `""` stands for `None`. For `openai_compat` only `""` is present. It no longer contains `reasoning` or `max_tokens`.
   - `POST /api/config` takes the connection settings and the write-only key as before; a body containing `reasoning` or `max_tokens` is refused with HTTP 400 ("moved to the request panel; send it with /api/complete") and changes nothing.
-  - `POST /api/complete` takes `prompt`, `system` and optional `settings`, an object whose keys are a subset of the eleven page-set generation arguments (`provider` comes from the dialog). A `settings` value that is not an object, or has a key outside the eleven, gets HTTP 400 before streaming and nothing is sent upstream. `null` values and absent keys are not passed, and `reasoning: ""` is treated as `null`; every other value passes to `complete()` unchanged (never converted with `value or None`, which would drop zeros). The server does no value checks; modelSpell's refusals arrive as one `error` event, and nothing is sent upstream. The UI deliberately does not call `check_settings()` first: it exists to exercise `complete()` itself.
+  - `POST /api/complete` takes `prompt`, `system` and optional `settings`, an object whose keys are a subset of the eleven page-set generation arguments (`provider` comes from the dialog). A `settings` value that is not an object, or has a key outside the eleven, gets HTTP 400 before streaming and nothing is sent upstream. `null` values and absent keys are not passed, and `reasoning: ""` is treated as `null`; every other value passes to `complete()` unchanged (never converted with `value or None`, which would drop zeros). The server does no value checks; modelSpell's refusals arrive as one `error` event, and nothing is sent upstream. The UI exercises `complete()` directly and reports its validation errors through the stream.
 - **Calls:** single-turn, always streamed. Events are newline-delimited JSON: `reasoning` and `text` fragments, then one `result` or one `error`. The `result` event carries `settings_sent`: the generation arguments passed to `complete()` (including the provider pin), non-`null` only. They are what was sent, not a statement of what the model applied.
 - **Cross-tab limits.** If another tab changes the model source, a page's `supported` lists are stale until it reloads; its next request may carry a setting the new route refuses, which arrives as an `error` event. No revision checks are made.
 - **Stop** (v8): `/api/complete` creates a `CancelHandle` per request, registers it under a random ID and sends `{"type": "started", "id": ...}` first. `POST /api/complete/stop` with `{"id": ...}` cancels that handle (`{"stopping": true}`; `{"already_finished": true}` for an unknown or finished ID; 400 without an ID). The stream then ends with `{"type": "cancelled", "sent": ..., "partial": ...}`, and the status line says "stopped — request not sent" or "stopped — the request may have been sent; the backend may keep generating". Stop therefore acts before the first token. Browser disconnect is unchanged: noticed at the next write, it cancels through the callback. The status line says "usage not reported" when `result.usage` is `null`.
@@ -1745,7 +1768,7 @@ def check_tool_request(
 
 `route_identity` holds `kind`, `base_url` (scheme and host lower-cased, default port and trailing slash removed), `model` (the ID sent), `transport` (`chat_completions` or `responses`), `reasoning` and `provider` (the effective policy, or `None`). Identities are compared as JSON values: mapping key order is ignored, lists and tuples are the same array, array order and scalar types are kept (`true` ≠ `1` ≠ `1.0`). The key is not part of the identity, so key rotation does not invalidate replay; checking the actual destination and its trust on every send is the caller's.
 
-Every OpenRouter tool request, including the first, needs an explicit pin, checked by preflight and completion alike: `provider.order` with exactly one non-empty slug (a base provider slug, which may match several endpoints of that provider, or a qualified slug), `provider.allow_fallbacks is False`, `provider.only` absent or exactly that one slug, no `provider.ignore` entry equal to the slug or its base provider (case-insensitive), and `require_parameters` absent or `True`. The policy must be a JSON value. modelSpell sends a copy with `require_parameters: true` added when absent; the rest of the caller's policy is preserved and the caller's mapping is never changed. Discovery of whether a provider supports tools stays the caller's (M2-16).
+Every OpenRouter tool request, including the first, needs an explicit pin, checked by preflight and completion alike: `provider.order` with exactly one non-empty slug (a base provider slug, which may match several endpoints of that provider, or a qualified slug), `provider.allow_fallbacks is False`, `provider.only` absent or exactly that one slug, no `provider.ignore` entry equal to the slug or its base provider (case-insensitive), and `require_parameters` absent or `True`. The policy uses the same snapshot rules as the tool schema and preserves finite `Decimal` values in the exact tool encoder. modelSpell sends a copy with `require_parameters: true` added when absent; the rest of the caller's policy is preserved and the caller's mapping is never changed. Discovery of whether a provider supports tools stays the caller's (M2-16).
 
 ### 21.5 Terminal rules: when calls are released
 

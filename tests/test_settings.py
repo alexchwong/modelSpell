@@ -10,7 +10,7 @@ import socket
 import pytest
 
 from conftest import MSGS, canned, ep, route_of
-from modelspell import (AuthError, ConfigError, Endpoint, UnsupportedSetting, check_settings, complete,
+from modelspell import (AuthError, ConfigError, Endpoint, UnsupportedSetting, check_completion, check_settings, complete,
                         ModelInfo, supported_settings)
 
 NEW = ("top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty", "seed", "stop")
@@ -233,11 +233,16 @@ def test_r16_check_settings_agrees_with_complete(server, kind, reasoning, kw, ex
     if expected is None:
         assert from_complete is None
         assert check_settings(kind, reasoning=reasoning, **kw) is None
+        assert check_completion(ep(server, kind), "m", reasoning=reasoning, **kw) is None
         return
     with pytest.raises(expected) as from_check:
         check_settings(kind, reasoning=reasoning, **kw)
     assert type(from_check.value) is type(from_complete) is expected
-    assert str(from_check.value) == str(from_complete)
+    with pytest.raises(expected) as preflight:
+        check_completion(ep(server, kind), "m", reasoning=reasoning, **kw)
+    assert type(preflight.value) is expected
+    assert str(preflight.value) == str(from_check.value) == str(from_complete)
+    assert server.requests == []
 
 
 @pytest.mark.parametrize("kind,reasoning", ROUTES)
@@ -248,13 +253,18 @@ def test_r16_accepts_every_supported_setting(kind, reasoning):
     assert check_settings(kind, reasoning=reasoning, **kw) is None
 
 
-def test_r16_no_key_needed(server, no_io):
+def test_r16_no_key_needed(server, no_io, monkeypatch):
     endpoint = Endpoint(kind="openrouter", base_url=server.url + "/v1")  # no api_key; env var unset (conftest)
     with pytest.raises(AuthError):
         complete(endpoint, "m", "x", temperature=1.5, top_k=5)
     assert server.requests == []
+    def no_credentials(self):
+        raise AssertionError("credential lookup")
+
+    monkeypatch.setattr(Endpoint, "_resolve_key", no_credentials)
     no_io()
     assert check_settings("openrouter", temperature=1.5, top_k=5) is None
+    assert check_completion(endpoint, "m", temperature=1.5, top_k=5, provider={"zdr": True}) is None
 
 
 def test_r16_provider_checks_match(server):
@@ -265,7 +275,10 @@ def test_r16_provider_checks_match(server):
             check_settings(kind, provider=provider)
         with pytest.raises(cls) as b:
             complete(ep(server, kind), "m", "x", provider=provider)
-        assert str(a.value) == str(b.value) and server.requests == []
+        with pytest.raises(cls) as preflight:
+            check_completion(ep(server, kind), "m", provider=provider)
+        assert type(preflight.value) is type(a.value) is type(b.value)
+        assert str(preflight.value) == str(a.value) == str(b.value) and server.requests == []
 
 
 def test_value_check_precedes_support(server):

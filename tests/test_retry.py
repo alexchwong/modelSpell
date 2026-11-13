@@ -139,11 +139,13 @@ def test_l5_retry_after_parser(monkeypatch):
         assert _http.retry_after(bad) is None, bad
 
 
-def test_l5_too_long_retry_after_surfaces_at_once(server, pauses):
-    server.reply(r429("999"), canned("chat", False))
+@pytest.mark.parametrize("delay,budget", [("999", 30.0), ("9" * 64, 1_000_000)])
+def test_l5_too_long_retry_after_surfaces_at_once(server, pauses, delay, budget):
+    server.reply(r429(delay), canned("chat", False))
+    events = []
     with pytest.raises(BackendError) as info:
-        run(server, rate_limit_retries=3)
-    assert info.value.status == 429 and len(server.requests) == 1 and pauses == []
+        run(server, rate_limit_retries=3, max_retry_wait=budget, on_retry=events.append)
+    assert info.value.status == 429 and len(server.requests) == 1 and pauses == [] and events == []
 
 
 # --- L6: cumulative wait limit ------------------------------------------------------------------------
@@ -238,8 +240,15 @@ def test_l9_cancel_during_a_later_attempt(server, pauses):
 def test_l9_cancel_from_on_retry_stops_before_the_next_attempt(server):
     handle = CancelHandle()
     server.reply(r429(), canned("chat", False))
+    events = []
+
+    def stop(event):
+        events.append(event)
+        handle.cancel()
+
     with pytest.raises(Cancelled) as info:
-        run(server, rate_limit_retries=2, cancel=handle, on_retry=lambda e: handle.cancel())
+        run(server, rate_limit_retries=2, cancel=handle, on_retry=stop)
+    assert events == [RetryEvent(1, 2, 1.0, 429)]
     assert info.value.sent is True and len(server.requests) == 1
 
 

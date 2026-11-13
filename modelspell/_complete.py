@@ -1,4 +1,4 @@
-"""complete(), supported_settings(), check_settings(): validation, route selection, extra merge, dispatch (spec §6).
+"""Ordinary completion, configuration checks, route selection and dispatch (spec §6).
 
 The dispatch and the opt-in HTTP 429 retry loop (spec v9 §6.11) are shared with complete_with_tools().
 """
@@ -10,8 +10,10 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 
 from . import _http
 from ._cancel import CancelHandle, _Stop, _Watch
+from ._json import _prepare_provider
 from ._routes import Acc, chat, lmstudio_native, responses
 from ._sse import iter_sse
+from ._timing import _COMPLETION_TIMEOUT, _MAX_RETRY_WAIT, _check_retry_wait, _check_timeout
 from ._types import KINDS, Endpoint, Message, ModelInfo, Result, RetryEvent
 from .errors import AuthError, BackendError, Cancelled, ConfigError, ModelSpellError, UnsupportedSetting
 
@@ -27,7 +29,7 @@ def _num(value: Any) -> bool:
 
 
 def _finite(value: Any) -> bool:
-    """A number (not bool) that JSON can encode: ints always, floats unless inf/nan (v6 §6.8.3)."""
+    """A finite number (not bool), before the integer encoding check (v6 §6.8.3)."""
     return _num(value) and (isinstance(value, int) or math.isfinite(value))
 
 
@@ -107,6 +109,16 @@ def _unsupported_message(name: str, route: _Route) -> str:
     return f"{name} is not supported on {route.label}; pass it through extra"
 
 
+def _check_integer_encoding(name: str, value: int) -> None:
+    try:
+        int.__repr__(value)
+    except ValueError:
+        pass
+    else:
+        return
+    raise ConfigError(f"{name} exceeds Python's integer digit limit for JSON encoding")
+
+
 def _check_settings(kind: Any, reasoning: Any, settings: Mapping[str, Any], provider: Any) -> _Route:
     """The generation-setting checks (spec v6 §6.8.4), shared by check_settings() and complete()."""
     route = _check_kind_reasoning(kind, reasoning)
@@ -124,6 +136,8 @@ def _check_settings(kind: Any, reasoning: Any, settings: Mapping[str, Any], prov
             if (lo is not None and value < lo) or value > hi:
                 bounds = f"<= {hi}" if lo is None else f"between {lo} and {hi}"
                 raise ConfigError(f"{name} must be {bounds} on {route.label}")
+        if isinstance(value, int):
+            _check_integer_encoding(name, value)
     if provider is not None:
         if kind != "openrouter":
             raise UnsupportedSetting("provider routing is only supported on openrouter")
@@ -160,7 +174,7 @@ def check_settings(
     stop: list[str] | tuple[str, ...] | None = None,
     provider: Mapping[str, Any] | None = None,
 ) -> None:
-    """Run complete()'s generation-setting checks without an endpoint, key, environment or network.
+    """Run complete()'s generation and provider checks without an endpoint, key, environment or network.
 
     Raises the same ConfigError / UnsupportedSetting, with the same message, that complete() would
     raise for these settings; returns None when they all pass.
@@ -169,6 +183,7 @@ def check_settings(
         max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
         repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
         frequency_penalty=frequency_penalty, seed=seed, stop=stop), provider)
+    _prepare_provider(provider)
 
 
 def _message(item: Any) -> dict | None:
@@ -210,21 +225,17 @@ def _model_arg(model: Any) -> tuple[str, ModelInfo | None]:
     return model, None
 
 
-def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, callbacks,
-              cancel=None) -> tuple[_Route, str, ModelInfo | None]:
+def _check_completion_config(
+    endpoint, model, reasoning, settings, provider, timeout, rate_limit_retries, max_retry_wait,
+) -> tuple[_Route, str, ModelInfo | None, dict | None]:
     if not isinstance(endpoint, Endpoint):
         raise ConfigError("endpoint must be an Endpoint")
     model_id, info = _model_arg(model)
     route = _check_settings(endpoint.kind, reasoning, settings, provider)
-    if extra is not None and (not isinstance(extra, Mapping) or {"model", "stream"} & set(extra)):
-        raise ConfigError("extra must be a mapping without the keys 'model' or 'stream'")
-    if not (_num(timeout) and timeout > 0):
-        raise ConfigError("timeout must be a number > 0")
-    if any(cb is not None and not callable(cb) for cb in callbacks):
-        raise ConfigError("on_text and on_reasoning must be None or callable")
-    if cancel is not None and not isinstance(cancel, CancelHandle):
-        raise ConfigError("cancel must be None or a CancelHandle")
-    return route, model_id, info
+    policy = _prepare_provider(provider)
+    _check_timeout(timeout)
+    _check_retry_limits(rate_limit_retries, max_retry_wait)
+    return route, model_id, info, policy
 
 
 # --- opt-in HTTP 429 recovery (spec v9 §6.11) ----------------------------------------------------
@@ -235,8 +246,7 @@ MAX_RATE_LIMIT_RETRIES = len(_BACKOFF)
 def _check_retry_limits(rate_limit_retries: Any, max_retry_wait: Any) -> None:
     if not (_int(rate_limit_retries) and 0 <= rate_limit_retries <= MAX_RATE_LIMIT_RETRIES):
         raise ConfigError(f"rate_limit_retries must be an int from 0 to {MAX_RATE_LIMIT_RETRIES}")
-    if not (_finite(max_retry_wait) and max_retry_wait >= 0):
-        raise ConfigError("max_retry_wait must be a finite number >= 0")
+    _check_retry_wait(max_retry_wait)
 
 
 def _check_on_retry(on_retry: Any) -> None:
@@ -318,6 +328,41 @@ def _cancelled(call: _http.Call, acc: Acc, watch: _Watch) -> Cancelled:
     return exc
 
 
+def check_completion(
+    endpoint: Endpoint,
+    model: str | ModelInfo,
+    *,
+    reasoning: Literal["off", "low", "medium", "high"] | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    min_p: float | None = None,
+    repetition_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    frequency_penalty: float | None = None,
+    seed: int | None = None,
+    stop: list[str] | tuple[str, ...] | None = None,
+    provider: Mapping[str, Any] | None = None,
+    timeout: float = _COMPLETION_TIMEOUT,
+    rate_limit_retries: int = 0,
+    max_retry_wait: float = _MAX_RETRY_WAIT,
+    **unknown: Any,
+) -> None:
+    """Check an ordinary completion's target, typed settings and transport options offline.
+
+    Raises as complete() would for those options. Unknown keywords take precedence.
+    Needs no credentials or messages and does not establish server or model acceptance.
+    """
+    if unknown:
+        raise ConfigError(f"unknown completion option: {min(unknown)}")
+    settings = dict(max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
+                    repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
+                    frequency_penalty=frequency_penalty, seed=seed, stop=stop)
+    _check_completion_config(endpoint, model, reasoning, settings, provider, timeout,
+                             rate_limit_retries, max_retry_wait)
+
+
 def complete(
     endpoint: Endpoint,
     model: str | ModelInfo,
@@ -336,20 +381,25 @@ def complete(
     stop: list[str] | tuple[str, ...] | None = None,
     provider: Mapping[str, Any] | None = None,
     extra: Mapping[str, Any] | None = None,
-    timeout: float = 900.0,
+    timeout: float = _COMPLETION_TIMEOUT,
     on_text: Callable[[str], None] | None = None,
     on_reasoning: Callable[[str], None] | None = None,
     cancel: CancelHandle | None = None,
     rate_limit_retries: int = 0,
-    max_retry_wait: float = 30.0,
+    max_retry_wait: float = _MAX_RETRY_WAIT,
     on_retry: Callable[[RetryEvent], None] | None = None,
 ) -> Result:
     settings = dict(max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
                     repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
                     frequency_penalty=frequency_penalty, seed=seed, stop=stop)
-    route, model_id, info = _validate(endpoint, model, reasoning, settings, provider, extra, timeout,
-                                      (on_text, on_reasoning), cancel)
-    _check_retry_limits(rate_limit_retries, max_retry_wait)
+    route, model_id, info, policy = _check_completion_config(
+        endpoint, model, reasoning, settings, provider, timeout, rate_limit_retries, max_retry_wait)
+    if extra is not None and (not isinstance(extra, Mapping) or {"model", "stream"} & set(extra)):
+        raise ConfigError("extra must be a mapping without the keys 'model' or 'stream'")
+    if any(cb is not None and not callable(cb) for cb in (on_text, on_reasoning)):
+        raise ConfigError("on_text and on_reasoning must be None or callable")
+    if cancel is not None and not isinstance(cancel, CancelHandle):
+        raise ConfigError("cancel must be None or a CancelHandle")
     _check_on_retry(on_retry)
     messages = _messages(input)
     key = endpoint._resolve_key()
@@ -369,7 +419,7 @@ def complete(
     body_reasoning = reasoning
     if route.module is lmstudio_native and info is not None and not info.reasoning_options:
         body_reasoning = None
-    body = route.module.build_body(messages, model_id, reasoning=body_reasoning, provider=provider,
+    body = route.module.build_body(messages, model_id, reasoning=body_reasoning, provider=policy,
                                    settings={k: v for k, v in settings.items() if v is not None},
                                    streaming=streaming, kind=endpoint.kind)
     body.update(extra or {})

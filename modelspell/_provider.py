@@ -13,9 +13,10 @@ from typing import Any
 
 from . import _http
 from ._cancel import CancelHandle
-from ._complete import check_settings, complete
+from ._complete import _SAMPLING, _check_settings, complete
 from ._discovery import _call, _list, _providers
-from ._json import FrozenMap, JSONValueError, freeze, thaw
+from ._json import FrozenMap, _prepare_provider, freeze, thaw
+from ._timing import _check_timeout
 from ._tools import ToolDefinition, check_tool_request, complete_with_tools
 from ._types import Endpoint
 from .errors import Cancelled, ConfigError, ModelSpellError, ResponseFormatError
@@ -75,18 +76,6 @@ def _field(obj, key):
     return obj.get(key) if isinstance(obj, Mapping) else None
 
 
-def _selector_json(value):
-    if isinstance(value, Decimal):
-        value = float(value)
-        if not math.isfinite(value):
-            raise ConfigError("provider policy must contain finite JSON numbers")
-    if isinstance(value, Mapping):
-        return {k: _selector_json(v) for k, v in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_selector_json(v) for v in value]
-    return value
-
-
 def _contains_secret(value, key):
     if isinstance(value, str):
         return key in value
@@ -100,10 +89,7 @@ def _contains_secret(value, key):
 def _policy_input(policy, mode, key):
     if policy is not None and not isinstance(policy, Mapping):
         raise ConfigError("provider must be a mapping")
-    try:
-        policy = _selector_json(freeze({} if policy is None else policy))
-    except JSONValueError:
-        raise ConfigError("provider policy must contain JSON values") from None
+    policy = _prepare_provider(policy) if policy is not None else {}
     if key and _contains_secret(policy, key):
         raise ConfigError("provider selection inputs contain the API credential")
     if mode != "automatic":
@@ -466,16 +452,13 @@ def choose_provider(
     if (type(max_attempts) is not int or not 1 <= max_attempts <= 4
             or any(type(v) is not int or not 1 <= v <= 10**9 for v in (input_tokens, output_tokens))):
         raise ConfigError("max_attempts must be 1–4 and token estimates must be positive integers up to one billion")
-    if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
-            or not _number(timeout) or timeout > threading.TIMEOUT_MAX):
-        raise ConfigError("timeout must be a finite positive number within the platform timer limit")
+    _check_timeout(timeout)
     deadline = time.monotonic() + timeout
     if cancel is not None and not isinstance(cancel, CancelHandle):
         raise ConfigError("cancel must be a CancelHandle")
     if settings is not None and not isinstance(settings, Mapping):
         raise ConfigError("settings must be a mapping")
     settings = dict(settings or {})
-    from ._complete import _SAMPLING
     if any(k not in (*_SAMPLING, "reasoning") for k in settings):
         raise ConfigError("settings must contain only supported generation arguments")
     key = endpoint._resolve_key()
@@ -497,7 +480,7 @@ def choose_provider(
             provisional = freeze({k: v for k, v in provisional.items() if k != "ignore"})
         check_tool_request("openrouter", tools=(_PROBE_TOOL,), provider=provisional, **settings)
     else:
-        check_settings("openrouter", provider=policy, **settings)
+        _check_settings("openrouter", settings.get("reasoning"), settings, policy)
     evidence = {"model": model, "mode": mode, "preset": preset if mode == "automatic" else None,
                 "threshold": _quantity(floor) if mode == "automatic" else None, "pin_source": mode,
                 "catalogue": "not requested", "attempts": [], "input_tokens": input_tokens,

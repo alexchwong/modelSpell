@@ -1,6 +1,6 @@
 """Dev-only K3 smoke test against an inline stub server, using the installed wheel.
 
-Runs one complete() call and one two-turn complete_with_tools() exchange (spec v9 §18.2).
+Exercises ordinary completion, a two-turn tool exchange and OpenRouter preflight and selection.
 """
 import json
 import os
@@ -61,7 +61,9 @@ follow = modelspell.complete_with_tools(endpoint, "m", [*history, turn, modelspe
 assert follow.clean and follow.tool_calls == () and follow.result.text == "pong", follow
 assert BODIES[-1]["messages"][-1] == {"role": "tool", "tool_call_id": "call_1", "content": "blue"}, BODIES[-1]
 router = modelspell.Endpoint("openrouter", endpoint.base_url, api_key="synthetic-smoke-key")
-selection = modelspell.choose_provider(router, "test/model", provider={"max_price": {"prompt": 1}})
+policy = {"max_price": {"prompt": 1}}
+modelspell.check_completion(router, "test/model", provider=policy)
+selection = modelspell.choose_provider(router, "test/model", provider=policy)
 assert selection.slug == "test/fast" and selection.evidence["attempts"][0]["sent"]
 assert modelspell.complete(router, "test/model", "ping", provider=selection.policy).text == "pong"
 print("smoke ok:", modelspell.__file__)

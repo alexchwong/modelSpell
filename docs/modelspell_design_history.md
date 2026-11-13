@@ -248,3 +248,17 @@ admits any of them for adaptive runs; record the reported provider on both turns
 stateless Responses replay fails, bring back an explicitly selected, separately verified Chat
 Completions design; scriptSpell's 429→success and exhausted-429 benchmark paths and its
 paid-attempt cap before it opts in.
+
+## Configuration refactor v4 (package 0.4.0)
+
+- Hosts can validate a resolved ordinary request before selection. Manual selection can contact
+  discovery, and Automatic can spend its own budget on synthetic probes. Checking the model,
+  typed policy and transport limits first prevents those calls for invalid completion settings.
+  Send authorization and spending decisions stay with the host.
+- Ordinary completion and selection share policy preparation. Snapshotting nested mappings and
+  arrays detaches the request from caller data. Converting finite `Decimal` values to floats
+  preserves the selector's existing precision and the ordinary standard JSON encoder. Direct
+  tool requests keep exact decimal encoding and the existing replay identity.
+- Completion, discovery and selection share a 1,000,000-second cap. It leaves room below socket
+  selector and thread wait limits. Retry wait uses the same cap and permits zero. Selection
+  retains its own deadline, and completion still applies its timeout separately to each attempt.

@@ -81,7 +81,7 @@ Changes under `modelspell/` must keep these; tests enforce most of them.
 
 `provider` has different meanings depending on context:
 
-- In `complete(provider=...)` and `check_settings(provider=...)`, it is an OpenRouter routing
+- In `complete()`, `check_completion()` and `check_settings()`, `provider` is an OpenRouter routing
   mapping, such as `{"order": ["deepinfra/turbo"], "allow_fallbacks": False}`.
 - `Result.provider` is the provider string reported by the response, not a routing mapping or
   necessarily the endpoint slug requested by the caller.
@@ -112,6 +112,17 @@ recovery L1–L13 (`tests/test_retry.py`, §12.12); both use the fake server's `
 and retry tests observe backoff by patching `_Watch.pause`, never by sleeping. Cancellation is C1–C9 (`tests/test_cancel.py`, spec v8 §12.10), usage while
 streaming S14, the owner-check battery O1–O7 (`tests/test_owner_checks.py`) and the UI's Stop and
 owner-check routes U11–U16.
+
+`tests/test_completion_config.py` covers the ordinary preflight, shared timeout and retry bounds,
+policy normalization and the importable `examples/batch_selection.py`. The existing request
+goldens and settings cases also exercise preflight. K3 runs `check_completion()` from the
+installed wheel before OpenRouter selection.
+
+For consumer integration, use the same candidate wheel for scriptSpell and AgentWiz. Record the
+source commit and wheel SHA-256 with each run, force-reinstall the exact local wheel if version
+0.4.0 is already installed, and verify the imported build exposes `check_completion()`. Adjust
+consumer smoke expectations that still assert 0.3.0 when testing this candidate. Published
+dependency pins and release publication are separate release actions.
 
 **Cancellation tests** order stages with hooks, never sleeps: events the fake sets when it reaches
 a stage (`server.reached`, `server.hold_event(i)`), and events set by patched standard-library
@@ -278,7 +289,7 @@ under *Advanced* (collapsed, with a count such as "Advanced (3 set, 1 not sent)"
 - The page refuses only what JavaScript/JSON would change silently: non-numeric text, non-finite
   numbers (`1e400`) and non-safe integers for max tokens, top-k and seed. Everything else, ranges
   included, is left to modelSpell, whose error arrives as an `error` event. The UI does not call
-  `check_settings()`: it exists to exercise `complete()` itself.
+  the offline preflights. It exercises `complete()` directly and keeps the independent owner checks.
 - **"Settings sent"** in the Result panel (`settings_sent` in the `result` event, including the
   provider pin) records what was sent, not what the model applied.
 - **Stop sequences** are one per line; a stop sequence containing a newline cannot be entered.

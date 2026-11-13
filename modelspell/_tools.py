@@ -15,10 +15,11 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 from . import _http
 from ._cancel import CancelHandle, _Watch
 from ._complete import (_Retry, _check_kind_reasoning, _check_on_retry, _check_retry_limits, _check_settings,
-                        _dispatch, _message, _model_arg, _num)
+                        _dispatch, _message, _model_arg)
 from ._json import FrozenMap, JSONValueError, canon, dumps, freeze
 from ._routes import Acc, lmstudio_native, responses
 from ._sse import iter_sse
+from ._timing import _COMPLETION_TIMEOUT, _MAX_RETRY_WAIT, _check_timeout
 from ._types import Endpoint, Message, ModelInfo, Result, RetryEvent
 from .errors import AuthError, ConfigError, ResponseFormatError, UnsupportedSetting
 
@@ -236,7 +237,7 @@ def check_tool_request(
     stop: list[str] | tuple[str, ...] | None = None,
     provider: Mapping[str, Any] | None = None,
     rate_limit_retries: int = 0,
-    max_retry_wait: float = 30.0,
+    max_retry_wait: float = _MAX_RETRY_WAIT,
 ) -> None:
     """Run complete_with_tools()'s route, setting, tool, provider-pin and retry checks without I/O.
 
@@ -357,12 +358,12 @@ def complete_with_tools(
     seed: int | None = None,
     stop: list[str] | tuple[str, ...] | None = None,
     provider: Mapping[str, Any] | None = None,
-    timeout: float = 900.0,
+    timeout: float = _COMPLETION_TIMEOUT,
     on_text: Callable[[str], None] | None = None,
     on_reasoning: Callable[[str], None] | None = None,
     cancel: CancelHandle | None = None,
     rate_limit_retries: int = 0,
-    max_retry_wait: float = 30.0,
+    max_retry_wait: float = _MAX_RETRY_WAIT,
     on_retry: Callable[[RetryEvent], None] | None = None,
 ) -> ToolTurn:
     """One model turn offering `tools`. Sends one HTTP POST unless rate_limit_retries opts in to 429 retries."""
@@ -374,8 +375,7 @@ def complete_with_tools(
     model_id, _ = _model_arg(model)
     route, tools, policy = _check_tool_request(endpoint.kind, reasoning, settings, provider, tools,
                                                rate_limit_retries, max_retry_wait)
-    if not (_num(timeout) and timeout > 0):
-        raise ConfigError("timeout must be a number > 0")
+    _check_timeout(timeout)
     if any(cb is not None and not callable(cb) for cb in (on_text, on_reasoning)):
         raise ConfigError("on_text and on_reasoning must be None or callable")
     if cancel is not None and not isinstance(cancel, CancelHandle):

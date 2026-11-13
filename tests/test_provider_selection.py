@@ -9,7 +9,7 @@ import pytest
 
 from conftest import KEY, Reply, ep
 from modelspell import (CancelHandle, Cancelled, ConfigError, ProviderSelectionError, ToolDefinition,
-                        check_settings, check_tool_request, choose_provider, complete, complete_with_tools)
+                        check_completion, check_settings, check_tool_request, choose_provider, complete, complete_with_tools)
 from modelspell._http import Call
 from modelspell._json import thaw
 
@@ -85,31 +85,34 @@ def test_overlaps_duplicates_cost_and_missing_telemetry(server):
 @pytest.mark.parametrize("tools", [False, True])
 def test_effective_policy_preflights_and_wire_bytes(server, tools):
     requested = {"only": ["alpha"], "ignore": ["alpha/ignored"], "quantizations": ["fp4"],
-                 "data_collection": "deny", "max_price": {"prompt": Decimal("0.5"), "request": 0}}
+                 "data_collection": "deny", "zdr": True, "max_price": {"prompt": Decimal("0.5"), "request": 0}}
     good = row("alpha/fast", price="0.0000005", quantization="fp4")
     ignored = row("alpha/ignored", price="0", quantization="fp4")
     too_costly = row("alpha/price", price="0.0000005001", quantization="fp4")
     other = row("other", price="0", quantization="fp4")
     server.reply(endpoints(ignored, too_costly, other, row("alpha/unknown", price="0"), good),
-                 done(finish="length", message={"reasoning": "thinking"}))
+                 reply({"error": {}}, 403), done(finish="length", message={"reasoning": "thinking"}))
     endpoint = ep(server, "openrouter")
+    check_completion(endpoint, MODEL, provider=requested, reasoning="low", temperature=0.2)
     chosen = choose_provider(endpoint, MODEL, provider=requested, tools=tools,
                              settings={"reasoning": "low", "temperature": 0.2})
     assert requested["only"] == ["alpha"] and type(requested["max_price"]["prompt"]) is Decimal
     policy = {"only": ["alpha/fast"], "ignore": ["alpha/ignored"], "quantizations": ["fp4"],
-              "data_collection": "deny", "max_price": {"prompt": 0.5, "request": 0},
+              "data_collection": "deny", "zdr": True, "max_price": {"prompt": 0.5, "request": 0},
               "order": ["alpha/fast"], "allow_fallbacks": False}
     if tools:
         policy["require_parameters"] = True
     assert thaw(chosen.policy) == policy
     check_settings("openrouter", provider=chosen.policy)
+    check_completion(endpoint, MODEL, provider=chosen.policy, reasoning="low", temperature=0.2)
+    assert json.loads(json.dumps(chosen.policy, default=dict)) == policy
     check_tool_request("openrouter", provider=chosen.policy, tools=[TOOL])
     fn = complete_with_tools if tools else complete
     options = {"tools": [TOOL]} if tools else {}
     fn(endpoint, MODEL, "Reply OK.", provider=policy, max_tokens=64, reasoning="low", temperature=0.2, **options)
     fn(endpoint, MODEL, "Reply OK.", provider=chosen.policy, max_tokens=64, reasoning="low",
        temperature=0.2, **options)
-    assert server.requests[1]["raw"] == server.requests[2]["raw"] == server.requests[3]["raw"]
+    assert server.requests[2]["raw"] == server.requests[3]["raw"] == server.requests[4]["raw"]
     with pytest.raises(FrozenInstanceError):
         chosen.slug = "changed"
     with pytest.raises(TypeError):
@@ -129,6 +132,7 @@ def test_manual_verbatim_and_provider_scope(server):
     server.reply(endpoints(row("Test/Variant"), row("Test/Other")), done())
     endpoint = ep(server, "openrouter")
     selection = choose_provider(endpoint, MODEL, mode="manual", pin="Test/Variant")
+    check_completion(endpoint, MODEL, provider=selection.policy)
     complete(endpoint, MODEL, "ping", provider=selection.policy)
     assert server.requests[1]["body"]["provider"]["order"] == ["Test/Variant"]
     server.reply(endpoints(row("Test/Variant"), row("Test/Other")))

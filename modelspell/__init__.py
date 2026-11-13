@@ -1,6 +1,6 @@
 """ModelSpell: one normalised call shape for LM Studio, OpenRouter and OpenAI-compatible servers."""
 from ._cancel import CancelHandle
-from ._complete import check_settings, complete, supported_settings
+from ._complete import check_completion, check_settings, complete, supported_settings
 from ._discovery import list_models, list_providers
 from ._provider import ProviderSelection, ProviderSelectionError, choose_provider
 from ._tools import ToolCall, ToolDefinition, ToolOutput, ToolTurn, check_tool_request, complete_with_tools
@@ -11,7 +11,7 @@ from .errors import (AuthError, BackendError, Cancelled, ConfigError, ConnectErr
 
 __all__ = [
     "complete", "complete_with_tools", "list_models", "list_providers", "supported_settings", "check_settings",
-    "check_tool_request",
+    "check_completion", "check_tool_request",
     "Endpoint", "Message", "Result", "Usage", "ModelInfo", "ProviderInfo", "Pricing",
     "ToolDefinition", "ToolCall", "ToolTurn", "ToolOutput", "RetryEvent",
     "CancelHandle",
