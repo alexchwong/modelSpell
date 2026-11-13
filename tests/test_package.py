@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -83,7 +84,7 @@ def test_k3_k7_wheel_contents_and_clean_venv_install(tmp_path):
     assert "smoke ok" in smoke and str(tmp_path / "venv") in smoke
 
 
-def test_k4_concurrency(make_server):
+def test_k4_concurrency():
     import json
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -99,25 +100,52 @@ def test_k4_concurrency(make_server):
         def log_message(self, *a):
             pass
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Echo)
-    httpd.daemon_threads = True
-    threading.Thread(target=httpd.serve_forever, args=(0.02,), daemon=True).start()
+    class EchoServer(ThreadingHTTPServer):
+        # Accommodate all 16 clients even when a busy runner delays the accept loop.
+        request_queue_size = 64
+        daemon_threads = True
+
+    httpd = EchoServer(("127.0.0.1", 0), Echo)
+    server_thread = threading.Thread(target=httpd.serve_forever, args=(0.02,), daemon=True)
     endpoint = Endpoint(kind="openai_compat", base_url=f"http://127.0.0.1:{httpd.server_address[1]}/v1")
     results = {}
+    errors = {}
+    lock = threading.Lock()
 
     shared = CancelHandle()  # spec v8 §12.8: also with one shared handle that is never cancelled
 
     def worker(i):
-        results[i] = complete(endpoint, "m", f"prompt-{i}").text
-        results[100 + i] = complete(endpoint, "m", f"prompt-{i}", cancel=shared).text
+        phase = "without handle"
+        try:
+            text = complete(endpoint, "m", f"prompt-{i}", timeout=10).text
+            with lock:
+                results[i] = text
+            phase = "shared handle"
+            text = complete(endpoint, "m", f"prompt-{i}", cancel=shared, timeout=10).text
+            with lock:
+                results[100 + i] = text
+        except Exception as exc:
+            with lock:
+                errors[i] = f"{phase}: {type(exc).__name__}: {exc}"
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(30)
-    httpd.shutdown()
-    httpd.server_close()
+    threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(16)]
+    server_thread.start()
+    try:
+        deadline = time.monotonic() + 30
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(max(0, deadline - time.monotonic()))
+        alive = [i for i, t in enumerate(threads) if t.is_alive()]
+        assert not alive, f"K4 workers did not finish within 30 seconds: {alive}"
+        assert not errors, f"K4 worker failures: {errors}"
+    finally:
+        try:
+            httpd.shutdown()
+        finally:
+            httpd.server_close()
+            server_thread.join(5)
+    assert not server_thread.is_alive(), "K4 server thread did not stop"
     assert results == {**{i: f"prompt-{i}" for i in range(16)}, **{100 + i: f"prompt-{i}" for i in range(16)}}
     assert shared._watches == set() and not shared.cancelled
 

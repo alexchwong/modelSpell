@@ -118,6 +118,13 @@ policy normalization and the importable `examples/batch_selection.py`. The exist
 goldens and settings cases also exercise preflight. K3 runs `check_completion()` from the
 installed wheel before OpenRouter selection.
 
+K4's echo server uses an explicit connection backlog of 64 for its 16 concurrent clients,
+so accept-loop scheduling on busy CI runners does not exhaust the small default backlog.
+Worker failures report their index and request phase in the main test thread. Each request
+has a 10-second timeout; workers share one 30-second join deadline. Server teardown runs
+in `finally` and joins the serving thread. Both the ordinary and shared-handle echo checks
+remain required; no connection-error retries are added.
+
 For consumer integration, use the same candidate wheel for scriptSpell and AgentWiz. Record the
 source commit and wheel SHA-256 with each run, force-reinstall the exact local wheel if version
 0.4.0 is already installed, and verify the imported build exposes `check_completion()`. Adjust
