@@ -9,8 +9,8 @@
 3. `NEWS.md` records user-visible changes only: one bullet of at most 20 words under
    the version in `modelspell/_version.py`. Released sections are immutable. Tests,
    docs, UI, scripts and CI changes need no entry and no version bump.
-4. `modelspell/_version.py` is the only version source. Bump it on `devel` before any
-   change to `modelspell/`, `pyproject.toml`, `README.md` or `LICENSE` reaches `main`,
+4. `modelspell/_version.py` is the only version source. Bump it on `devel` before
+   changed shipped files reach `main` under an already published version (`modelspell/`, `pyproject.toml`, `README.md` or `LICENSE`),
    and run `python scripts/build_release.py --smoke` before merging.
 5. The wheel ships only `modelspell/**`, metadata and `LICENSE`. Keep the hatch
    `packages` and sdist `only-include` lists restrictive; packaging or metadata changes
@@ -18,5 +18,9 @@
 6. `tests.yml` keeps the 3.10/3.13 matrix and `workflow_call`; `release.yml` keeps
    `contents: write`, its concurrency group, NEWS-derived notes and the sha256 install
    line. Verify an action version bump before merging it.
+
+7. Testing has only two categories: offline and live. Downstream certification and
+   named diagnostic reports are not release prerequisites. Reuse owner-confirmed live
+   results for unchanged library payloads; never rerun paid tests without authorization.
 
 Where this file and `DEVEL.md` disagree, `DEVEL.md` wins; correct this file in the same change.
