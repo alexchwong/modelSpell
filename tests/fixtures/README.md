@@ -277,8 +277,8 @@ live verification.
 
 ### OpenRouter provider refactor v6
 
-Release verification uses `python3 scripts/verify_provider_refactor.py`.
+Optional specialized live diagnostics use `.venv/bin/python scripts/verify_provider_refactor.py`.
 It retains the exact tested wheel, report and independent triage records by run ID.
-The refactor's paid live checks and AgentWiz retest are pending owner verification on
-the committed candidate using the rotated credential. The older captures above remain
-historical observations.
+The owner confirmed live tests completed on November 15, 2026. This confirmation does not
+backfill historical captures or a harness report. AgentWiz retesting is not a release
+requirement. The older captures above remain historical observations.

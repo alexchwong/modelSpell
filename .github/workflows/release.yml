@@ -47,11 +47,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.config.outputs.tag }}
         run: |
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          # Listing succeeds for a missing tag but fails visibly on API/auth errors.
+          state="$(gh api --paginate "repos/${{ github.repository }}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .draft")"
+          case "$state" in
+            false) echo "exists=true" >> "$GITHUB_OUTPUT"; echo "state=published" >> "$GITHUB_OUTPUT" ;;
+            true) echo "exists=false" >> "$GITHUB_OUTPUT"; echo "state=draft" >> "$GITHUB_OUTPUT" ;;
+            "") echo "exists=false" >> "$GITHUB_OUTPUT"; echo "state=missing" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unexpected release state: $state" >&2; exit 1 ;;
+          esac
 
       - name: Require version bump after shipped-file changes
         if: steps.existing.outputs.exists == 'true'
@@ -68,25 +73,20 @@ jobs:
           fi
           echo "No shipped-file changes since $TAG; nothing to release."
 
-      - name: Verify the staged candidate wheel and named live gate
+      - name: Build, verify and smoke-test the release wheel (offline)
         if: steps.existing.outputs.exists != 'true'
         id: build
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.config.outputs.tag }}
           VERSION: ${{ steps.config.outputs.version }}
         run: |
           set -euo pipefail
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" != true ]]; then
-            echo "Stage the verified candidate and its gate report on a draft release." >&2
-            exit 1
-          fi
+          python -m venv .venv
+          .venv/bin/python scripts/build_release.py --smoke --output-dir candidate
           NAME="modelspell-$VERSION-py3-none-any.whl"
-          gh release download "$TAG" --pattern "$NAME" --pattern provider-gate.json --dir candidate
-          python scripts/verify_provider_refactor.py --publication-check \
-            candidate/provider-gate.json "candidate/$NAME" "$VERSION" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "candidate/$NAME" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
       - name: Publish the verified candidate
         if: steps.existing.outputs.exists != 'true'
@@ -112,8 +112,6 @@ jobs:
             echo "Release tag points to a different source commit." >&2
             exit 1
           fi
-          # Stage the verified local bytes again before making the release public.
-          gh release upload "$TAG" "candidate/$NAME" candidate/provider-gate.json --clobber
           {
             awk -v v="## $VERSION" '$0==v{on=1;next} /^## /{on=0} on' NEWS.md
             echo
@@ -125,6 +123,12 @@ jobs:
             echo
             echo "sha256: \`$SHA256\`"
           } > notes.md
-          gh release edit "$TAG" --target "$COMMIT" --title "modelSpell $VERSION" --notes-file notes.md --draft=false
+          if [[ "${{ steps.existing.outputs.state }}" == draft ]]; then
+            gh release upload "$TAG" "candidate/$NAME" --clobber
+            gh release edit "$TAG" --target "$COMMIT" --title "modelSpell $VERSION" --notes-file notes.md --draft=false
+          else
+            gh release create "$TAG" "candidate/$NAME" --target "$COMMIT" \
+              --title "modelSpell $VERSION" --notes-file notes.md
+          fi
           gh release download "$TAG" --pattern "$NAME" --dir published
           printf '%s  %s\n' "$SHA256" "published/$NAME" | sha256sum --check
