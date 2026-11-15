@@ -14,16 +14,17 @@ concurrency:
 
 jobs:
   tests:
+    if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/tests.yml
 
   release:
     needs: tests
     runs-on: ubuntu-latest
     steps:
-      - name: Check out main
+      - name: Check out the main commit tested by this run
         uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v7
@@ -100,6 +101,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          git fetch origin refs/heads/main
+          if [[ "$(git rev-parse FETCH_HEAD)" != "$(git rev-parse HEAD)" ]]; then
+            echo "Main advanced after this run started. Run the release workflow on current main." >&2
+            exit 1
+          fi
           # Verify an existing tag or bind the new tag to the tested source.
           tag_commit="$(git rev-parse --verify "$TAG^{commit}" 2>/dev/null || true)"
           if [[ -n "$tag_commit" && "$tag_commit" != "$COMMIT" ]]; then

@@ -23,7 +23,8 @@ Development, tests, the developer test UI and the release process are described 
 ```python
 from modelspell import (
     complete, complete_with_tools, list_models, list_providers, supported_settings, check_settings,
-    check_completion, check_tool_request,
+    check_completion, check_tool_request, choose_provider,
+    ProviderSelection, ProviderSelectionError,
     Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing,
     ToolDefinition, ToolCall, ToolTurn, ToolOutput, RetryEvent, CancelHandle,
     ModelSpellError, ConfigError, UnsupportedSetting, UnsupportedOperation,
@@ -35,6 +36,7 @@ from modelspell import (
 - `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None, rate_limit_retries=0, max_retry_wait=30.0, on_retry=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. Generation settings and `provider` set to `None` are omitted. Supported zero values are sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
 - `check_completion(endpoint, model, *, <generation settings>, provider=None, timeout=900.0, rate_limit_retries=0, max_retry_wait=30.0) -> None` — offline preflight for ordinary completions.
 - `complete_with_tools(endpoint, model, input, *, tools, ...) -> ToolTurn` and `check_tool_request(kind, *, tools, ...) -> None` — client-executed function calling; see [Tool calling](#tool-calling).
+- `choose_provider(endpoint, model, ...)` — resolve an OpenRouter routing policy and return its selection evidence. See [OpenRouter provider selection](#openrouter-provider-selection).
 - `rate_limit_retries`, `max_retry_wait`, `on_retry` — opt-in recovery from HTTP 429 on both completion functions; see [HTTP 429 recovery](#http-429-recovery).
 - `CancelHandle()` — pass it as `complete(..., cancel=handle)` and call `handle.cancel()` from any thread to end the call at any stage; see [Cancellation](#cancellation).
 - `supported_settings(kind, reasoning=None) -> frozenset[str]` and `check_settings(kind, *, reasoning=None, max_tokens=None, …, provider=None) -> None` — pure helpers for the generation settings; see below.
@@ -201,7 +203,7 @@ These are two separate model turns. Inspect `follow_up` for text, more calls or 
 | LM Studio | `/v1/responses`, `store: false`, full output items replayed in order (opaque reasoning fields included) | `reasoning="off"` (the native route) is refused for tool turns. Ordinary text requests keep their old body. |
 | llama-server (`openai_compat`) | Chat Completions | Depends on the server build, model and a tool-capable chat template. Reasoning is kept in `result` but not sent back. |
 
-**Verification status (0.4.0).** The request and response formats above, the completed-turn rules and replay are verified offline only, against synthetic fixtures. No live tool round trip has been recorded yet: treat every route as unverified until its `VT` run passes (`tests/fixtures/README.md`). Discovery hints such as `ModelInfo.supports_tools` are advisory and prove nothing.
+**Verification.** Synthetic fixtures cover the request and response formats, completed-turn rules and replay. Live verification applies to the backend, model and policy exercised in a passing tool round trip (VT). See the [live evidence record](tests/fixtures/README.md#tool-round-trips-vt-spec-v9-17--040) and the gate report attached to the 0.4.0 release. Discovery hints such as `ModelInfo.supports_tools` are advisory.
 
 ## HTTP 429 recovery
 

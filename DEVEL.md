@@ -41,8 +41,9 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 | `ui/` | no | Developer test UI (`python -m ui`) and the owner-check battery (`ui/owner_checks.py`). |
 | `scripts/build_release.py` | no | Builds and verifies the release wheel. |
 | `scripts/smoke_installed.py` | no | Smoke test run against an installed wheel (K3, `--smoke`). |
-| `examples/basic.py` | no | Usage example against a local LM Studio. |
-| `docs/` | no | Spec v9 (authoritative), specs v6–v8 (superseded, kept as history) and design history (informative). |
+| `scripts/verify_provider_refactor.py`, `scripts/provider_live.py` | no | Candidate provenance, OpenRouter live checks, incident triage and publication verification. |
+| `examples/` | no | Basic LM Studio use and OpenRouter batch selection. |
+| `docs/` | no | Spec v9, the OpenRouter provider refactor v6, superseded specs v6–v8 and design history. |
 | `.clinerules` | no | Agent operating rules; process detail lives in this guide. |
 | `.gitattributes` | no | Line-ending policy (`* text=auto eol=lf`). |
 | `.github/workflows/` | no | `tests.yml` (push, PR) and `release.yml` (push to `main`). |
@@ -380,23 +381,27 @@ do not treat it as a pass or add blanket macOS skips. Live checks skip without c
 Each job also runs `.venv/bin/python scripts/build_release.py --smoke` as a required step.
 This verifies the committed wheel and its clean-venv installation even if the suite's K3/K7
 test skips because wheel building is unavailable; build failures fail the job instead.
-The release workflow waits for all four test jobs, so macOS failures block publication too.
+The release workflow waits for all four test jobs and checks out the same `main` commit
+they tested. Publication stops if `main` has advanced. For a manual run, select `main`.
 
 ### OpenRouter verification and release checklist
 
-1. Update the version, NEWS, spec, documentation and evidence summary on `devel` before building
-   the final candidate. Record blocked or failed cases and their diagnoses. Keep previous live captures.
+1. Check the version, matching `NEWS.md` section, spec and documentation on `devel` before
+   building the final candidate. Record live results and any diagnoses in `tests/fixtures/README.md`
+   and retain earlier captures. The wheel embeds `README.md`, so changing it after verification
+   requires a new candidate and fresh evidence.
 2. From the committed candidate checkout, export the rotated, funded `OPENROUTER_API_KEY` and run
    `python3 scripts/verify_provider_refactor.py`. It uses the repo's `.venv` for the offline suite,
    pins the source commit, builds and smoke-tests the candidate, then runs the committed harness
    from a fresh wheel-only environment. Reports and wheels are retained per run under
    `reports/provider-refactor/`.
-3. Check the last line, `release_gate pass|fail|pending`. The named gate requires one Automatic
-   Balanced ZDR pin above 50 tokens/s to complete streamed and non-streamed VT on the same
-   candidate and effective policy. Exit 0 means the full run passed. Exit 1 means a correctness
-   check failed. Exit 2 means the named gate passed with other live cases blocked. Exit 3 means the
-   named gate is pending. Review every blocked and failed case. Resolve all named response-format
-   incidents before publication.
+3. Read the exit code and the final `release_gate pass|fail|pending` line. The named gate
+   requires an Automatic Balanced ZDR pin with published p50 throughput above 50 tokens/s
+   to complete streamed and non-streamed VT on the same candidate and effective policy.
+   Exit 0 means the full run passed. Exit 1 means a correctness check failed, even if the
+   named gate passed. Exit 2 means the named gate passed with other live cases blocked.
+   Exit 3 means the named gate is pending. Only exit 0 or 2 qualifies for publication.
+   Review blocked and failed cases and resolve every named response-format incident.
 4. For report-only triage run
    `python3 scripts/verify_provider_refactor.py --triage ORIGINAL_REPORT INCIDENT_ID upstream "Evidence-based reason"`.
    Use `modelspell` for a confirmed modelSpell defect. Each verdict produces a separate JSON file with
@@ -407,12 +412,14 @@ The release workflow waits for all four test jobs, so macOS failures block publi
    Record the actual endpoint, model, transport, reasoning, pin and scope, provider or served variant,
    quantization and effective policy. Repeat VT under AgentWiz's actual policy when relevant routing
    constraints change or the pin is ambiguous. A defect requires a new candidate and fresh evidence.
-6. Stage the exact verified wheel and the qualifying report (or latest qualifying triage record)
-   on a GitHub draft release for the version. Name the staged report `provider-gate.json`.
-   Target the tested source commit. Merge to `main` with the verified payload. If the merge changes
-   the payload, verify a new candidate. The release workflow reruns offline checks, verifies the staged
-   gate report, verifies that the tested source has the same payload as `main`, and publishes the
-   staged wheel bytes. Run the workflow manually if the push ran before staging.
+6. Stage the exact verified wheel and the qualifying `report.json` (or latest qualifying
+   triage record) on a GitHub draft release tagged `vX.Y.Z`. Name the report attachment
+   `provider-gate.json` and target the tested source commit. Both attachments become public
+   on publication. Merge to `main` with the verified payload. If the merge changes the
+   payload, verify a new candidate. The release workflow reruns offline checks, verifies
+   the staged gate report, compares the tested source payload with the release commit,
+   and publishes the staged wheel bytes. Run the workflow manually on `main` if staging
+   finished after the push triggered the workflow.
 7. Check the published SHA-256 against the candidate and test the install line in a fresh environment.
 
 For targeted OpenRouter V1, V2, and VT checks, set `MODELSPELL_LIVE_OPENROUTER_MODEL` in
