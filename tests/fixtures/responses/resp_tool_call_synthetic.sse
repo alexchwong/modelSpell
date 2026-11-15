@@ -1,0 +1,26 @@
+data: {"type": "response.created", "response": {"id": "resp_t", "object": "response", "model": "m", "status": "in_progress", "output": []}}
+
+data: {"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning", "id": "rs_1", "summary": []}}
+
+data: {"type": "response.reasoning_text.delta", "item_id": "rs_1", "output_index": 0, "delta": "Need the label."}
+
+data: {"type": "response.output_item.done", "output_index": 0, "item": {"type": "reasoning", "id": "rs_1", "summary": [], "content": [{"type": "reasoning_text", "text": "Need the label."}], "encrypted_content": "opaque=="}}
+
+data: {"type": "response.output_item.added", "output_index": 1, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}
+
+data: {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 1, "delta": "Looking."}
+
+data: {"type": "response.output_item.done", "output_index": 1, "item": {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Looking.", "annotations": []}]}}
+
+data: {"type": "response.output_item.added", "output_index": 2, "item": {"type": "function_call", "id": "fc_1", "call_id": "call_r1", "name": "read_label", "arguments": "", "status": "in_progress"}}
+
+data: {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 2, "delta": "{\"key\""}
+
+data: {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 2, "delta": ":\"007\"}"}
+
+data: {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 2, "arguments": "{\"key\":\"007\"}"}
+
+data: {"type": "response.output_item.done", "output_index": 2, "item": {"type": "function_call", "id": "fc_1", "call_id": "call_r1", "name": "read_label", "arguments": "{\"key\":\"007\"}", "status": "completed"}}
+
+data: {"type": "response.completed", "response": {"id": "resp_t", "object": "response", "model": "m", "status": "completed", "output": [{"type": "reasoning", "id": "rs_1", "summary": [], "content": [{"type": "reasoning_text", "text": "Need the label."}], "encrypted_content": "opaque=="}, {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Looking.", "annotations": []}]}, {"type": "function_call", "id": "fc_1", "call_id": "call_r1", "name": "read_label", "arguments": "{\"key\":\"007\"}", "status": "completed"}], "usage": {"input_tokens": 30, "output_tokens": 9, "total_tokens": 39}}}
+

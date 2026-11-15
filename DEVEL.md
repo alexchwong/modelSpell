@@ -1,7 +1,7 @@
 # Developer guide
 
 This file is for repository maintenance. Library usage is documented in `README.md`; the
-behavioural contract is `docs/modelspell_v1_spec_v8.md`; agent operating rules are in
+behavioural contract is `docs/modelspell_v1_spec_v9.md`; agent operating rules are in
 `.clinerules`. Nothing in this guide, `.clinerules`, `tests/`, `ui/`, `scripts/`, `examples/`
 or `docs/` ships in the release wheel.
 
@@ -41,8 +41,9 @@ python scripts/build_release.py --smoke   # build, verify and smoke-test the rel
 | `ui/` | no | Developer test UI (`python -m ui`) and the owner-check battery (`ui/owner_checks.py`). |
 | `scripts/build_release.py` | no | Builds and verifies the release wheel. |
 | `scripts/smoke_installed.py` | no | Smoke test run against an installed wheel (K3, `--smoke`). |
-| `examples/basic.py` | no | Usage example against a local LM Studio. |
-| `docs/` | no | Spec v8 (authoritative), specs v6 and v7 (superseded, kept as history) and design history (informative). |
+| `scripts/verify_provider_refactor.py`, `scripts/provider_live.py` | no | Candidate provenance, OpenRouter live checks, incident triage and publication verification. |
+| `examples/` | no | Basic LM Studio use and OpenRouter batch selection. |
+| `docs/` | no | Spec v9, the OpenRouter provider refactor v6, superseded specs v6–v8 and design history. |
 | `.clinerules` | no | Agent operating rules; process detail lives in this guide. |
 | `.gitattributes` | no | Line-ending policy (`* text=auto eol=lf`). |
 | `.github/workflows/` | no | `tests.yml` (push, PR) and `release.yml` (push to `main`). |
@@ -60,9 +61,15 @@ Changes under `modelspell/` must keep these; tests enforce most of them.
 - **No side effects.** No printing, logging, file I/O, network at import, or module-level mutable
   state (§2, K2). This is why the version lives in a `.py` file rather than a text file read at
   import, and why the UI lives outside the package.
-- **One HTTP request per `complete()` call.** No retries, no route or streaming fallback, no
-  redirect following; requests go through the per-call `_NoRedirectHandler` opener, never
-  `urlopen` (§6.3, §9.5).
+- **One HTTP request per `complete()` or `complete_with_tools()` call by default.** The only
+  retry is the opt-in HTTP 429 loop in `_complete._post` (spec v9 §6.11): it retries only an
+  error carrying `_http.py`'s private transport-429 marker, resends the bytes encoded once, and
+  waits through `_Watch.pause`. No route or streaming fallback, no redirect following; requests
+  go through the per-call `_NoRedirectHandler` opener, never `urlopen` (§6.3, §9.5).
+- **Tool turns are sealed.** Only the route parsers, through `ToolTurn._make`, create a
+  `ToolTurn`; `tool_calls` derives from the frozen `replay`; tool bodies are encoded by
+  `_json.dumps` (exact ints and `Decimal`), ordinary bodies by `json.dumps` exactly as in 0.3.0
+  (the goldens). Do not add a public constructor or a pickling path (spec v9 §21.2).
 - **Every completion request goes through the watched opener**, whose connections register and
   initiate each connection attempt atomically (spec v8 §9.6); discovery uses the plain one. A
   `CancelHandle` never holds its lock while caller code runs.
@@ -75,7 +82,7 @@ Changes under `modelspell/` must keep these; tests enforce most of them.
 
 `provider` has different meanings depending on context:
 
-- In `complete(provider=...)` and `check_settings(provider=...)`, it is an OpenRouter routing
+- In `complete()`, `check_completion()` and `check_settings()`, `provider` is an OpenRouter routing
   mapping, such as `{"order": ["deepinfra/turbo"], "allow_fallbacks": False}`.
 - `Result.provider` is the provider string reported by the response, not a routing mapping or
   necessarily the endpoint slug requested by the caller.
@@ -101,9 +108,29 @@ python -m pytest -m live -s             # live checks; see below
 ```
 
 Test IDs (R1, P7, S13, …) match the spec's §12 tables; keep them in test names or comments when
-adding cases. Cancellation is C1–C9 (`tests/test_cancel.py`, spec v8 §12.10), usage while
+adding cases. Tool calling is T1–T11 (`tests/test_tools.py`, spec v9 §12.11) and HTTP 429
+recovery L1–L13 (`tests/test_retry.py`, §12.12); both use the fake server's `raw` request bytes,
+and retry tests observe backoff by patching `_Watch.pause`, never by sleeping. Cancellation is C1–C9 (`tests/test_cancel.py`, spec v8 §12.10), usage while
 streaming S14, the owner-check battery O1–O7 (`tests/test_owner_checks.py`) and the UI's Stop and
 owner-check routes U11–U16.
+
+`tests/test_completion_config.py` covers the ordinary preflight, shared timeout and retry bounds,
+policy normalization and the importable `examples/batch_selection.py`. The existing request
+goldens and settings cases also exercise preflight. K3 runs `check_completion()` from the
+installed wheel before OpenRouter selection.
+
+K4's echo server uses an explicit connection backlog of 64 for its 16 concurrent clients,
+so accept-loop scheduling on busy CI runners does not exhaust the small default backlog.
+Worker failures report their index and request phase in the main test thread. Each request
+has a 10-second timeout; workers share one 30-second join deadline. Server teardown runs
+in `finally` and joins the serving thread. Both the ordinary and shared-handle echo checks
+remain required; no connection-error retries are added.
+
+For consumer integration, use the same candidate wheel for scriptSpell and AgentWiz. Record the
+source commit and wheel SHA-256 with each run, force-reinstall the exact local wheel if version
+0.4.0 is already installed, and verify the imported build exposes `check_completion()`. Adjust
+consumer smoke expectations that still assert 0.3.0 when testing this candidate. Published
+dependency pins and release publication are separate release actions.
 
 **Cancellation tests** order stages with hooks, never sleeps: events the fake sets when it reaches
 a stage (`server.reached`, `server.hold_event(i)`), and events set by patched standard-library
@@ -136,6 +163,14 @@ configuration and once with one that has none (two short requests each), and rec
 The probe is a diagnostic and is never part of a release check.
 The probe also discovers once, passes the matching entry (or falls back to the id), and reports
 only usable answers in its summaries, including each arm's ok count.
+
+**Tool round trips (VT, spec v9 §17)** use the same variables:
+`python -m pytest -m live -s -k vt`. Each turn prints a `VT {...}` line; paste them into
+`tests/fixtures/README.md` under "Tool round trips". A model that answers without calling skips
+(nothing verified). On OpenRouter set `MODELSPELL_LIVE_OPENROUTER_PROVIDER` to a provider that
+supports tools; a reported provider that differs from the pin fails. Malformed arguments and
+unknown names cannot be injected live (replay accepts only parser-built turns); they are covered
+offline by T6 and T7. `tests/test_live_helpers.py` runs the VT harness against the fake.
 
 Run verification V1 with
 `python -m pytest -m live -s tests/test_live.py::test_live_v1_discovery_to_routing_round_trip`
@@ -262,7 +297,7 @@ under *Advanced* (collapsed, with a count such as "Advanced (3 set, 1 not sent)"
 - The page refuses only what JavaScript/JSON would change silently: non-numeric text, non-finite
   numbers (`1e400`) and non-safe integers for max tokens, top-k and seed. Everything else, ranges
   included, is left to modelSpell, whose error arrives as an `error` event. The UI does not call
-  `check_settings()`: it exists to exercise `complete()` itself.
+  the offline preflights. It exercises `complete()` directly and keeps the independent owner checks.
 - **"Settings sent"** in the Result panel (`settings_sent` in the `result` event, including the
   provider pin) records what was sent, not what the model applied.
 - **Stop sequences** are one per line; a stop sequence containing a newline cannot be entered.
@@ -319,7 +354,7 @@ or a fake one:
 
 The spec is the contract. A behaviour change updates, in the same change:
 
-1. `docs/modelspell_v1_spec_v8.md` (or a new spec version), including §14 if it deviates from NEL;
+1. `docs/modelspell_v1_spec_v9.md` (or a new spec version), including §14 if it deviates from NEL;
 2. the tests named in the spec for that behaviour;
 3. `README.md` where it documents the behaviour;
 4. `NEWS.md` under the next version;
@@ -346,43 +381,57 @@ do not treat it as a pass or add blanket macOS skips. Live checks skip without c
 Each job also runs `.venv/bin/python scripts/build_release.py --smoke` as a required step.
 This verifies the committed wheel and its clean-venv installation even if the suite's K3/K7
 test skips because wheel building is unavailable; build failures fail the job instead.
-The release workflow waits for all four test jobs, so macOS failures block publication too.
+The release workflow waits for all four test jobs and checks out the same `main` commit
+they tested. Publication stops if `main` has advanced. For a manual run, select `main`.
 
-`release.yml` runs on every push to `main` (and manually). It reruns the tests, then:
+### OpenRouter verification and release checklist
 
-- **If `vX.Y.Z` is not yet released:** builds the wheel from `HEAD`, verifies its contents and
-  metadata, installs it into a fresh venv and runs the smoke test, then creates release `vX.Y.Z`
-  with the wheel attached. The release notes are the NEWS section plus a pinned install line with
-  the wheel's sha256.
-- **If `vX.Y.Z` already exists:** fails if any shipped file (`modelspell/`, `pyproject.toml`,
-  `README.md`, `LICENSE`) changed since the tag, so shipped changes cannot reach `main` without a
-  version bump. Changes to tests, the UI, scripts or docs merge without a release.
+1. Check the version, matching `NEWS.md` section, spec and documentation on `devel` before
+   building the final candidate. Record live results and any diagnoses in `tests/fixtures/README.md`
+   and retain earlier captures. The wheel embeds `README.md`, so changing it after verification
+   requires a new candidate and fresh evidence.
+2. From the committed candidate checkout, export the rotated, funded `OPENROUTER_API_KEY` and run
+   `python3 scripts/verify_provider_refactor.py`. It uses the repo's `.venv` for the offline suite,
+   pins the source commit, builds and smoke-tests the candidate, then runs the committed harness
+   from a fresh wheel-only environment. Reports and wheels are retained per run under
+   `reports/provider-refactor/`.
+3. Read the exit code and the final `release_gate pass|fail|pending` line. The named gate
+   requires an Automatic Balanced ZDR pin with published p50 throughput above 50 tokens/s
+   to complete streamed and non-streamed VT on the same candidate and effective policy.
+   Exit 0 means the full run passed. Exit 1 means a correctness check failed, even if the
+   named gate passed. Exit 2 means the named gate passed with other live cases blocked.
+   Exit 3 means the named gate is pending. Only exit 0 or 2 qualifies for publication.
+   Review blocked and failed cases and resolve every named response-format incident.
+4. For report-only triage run
+   `python3 scripts/verify_provider_refactor.py --triage ORIGINAL_REPORT INCIDENT_ID upstream "Evidence-based reason"`.
+   Use `modelspell` for a confirmed modelSpell defect. Each verdict produces a separate JSON file with
+   cumulative outcomes. Retain the original and each verdict. If the named case needs another model
+   or cost ceiling, use `--release-model`, `--release-max-input-price` or `--release-max-output-price`.
+   Price overrides are USD per million tokens and the fixed charge remains zero.
+5. Retest AgentWiz against the wheel and SHA-256 from the qualifying report before publication.
+   Record the actual endpoint, model, transport, reasoning, pin and scope, provider or served variant,
+   quantization and effective policy. Repeat VT under AgentWiz's actual policy when relevant routing
+   constraints change or the pin is ambiguous. A defect requires a new candidate and fresh evidence.
+6. Stage the exact verified wheel and the qualifying `report.json` (or latest qualifying
+   triage record) on a GitHub draft release tagged `vX.Y.Z`. Name the report attachment
+   `provider-gate.json` and target the tested source commit. Both attachments become public
+   on publication. Merge to `main` with the verified payload. If the merge changes the
+   payload, verify a new candidate. The release workflow reruns offline checks, verifies
+   the staged gate report, compares the tested source payload with the release commit,
+   and publishes the staged wheel bytes. Run the workflow manually on `main` if staging
+   finished after the push triggered the workflow.
+7. Check the published SHA-256 against the candidate and test the install line in a fresh environment.
 
-### Release checklist
-
-1. On `devel`, bump `modelspell/_version.py`.
-2. Add `## X.Y.Z` to `NEWS.md` (the build fails without it).
-3. Run the owner checks' Full preset on every available backend and paste the record into
-   `tests/fixtures/README.md`; record unavailable backends as blocked; claim live verification in
-   the README only for checks that passed. Do this before step 4: `README.md` is in the wheel.
-4. Commit, then run `python scripts/build_release.py --smoke` locally. It builds from the
-   committed `HEAD`; uncommitted edits are excluded and reported.
-5. Merge `devel` into `main`.
-6. Check the release page: wheel attached, notes correct, install line works in a fresh venv.
-
-**A release co-developed with a downstream project** (such as AgentWiz): the wheel from step 4,
-built from the committed `devel` HEAD, is the *release candidate*. Do not merge to `main` until the
-downstream project has retested against it, and keep the shipped files unchanged meanwhile. A
-defect found downstream means a fix on `devel` and a new candidate. After the release, compare the
-released wheel with the candidate: equal sha256, or every member byte-identical after unpacking
-(including `METADATA`, `WHEEL` and `RECORD`), means it is the tested candidate; any differing member
-makes it a new candidate that the downstream project retests before pinning. Never edit a
-published release; fix on `devel` and release a patch version.
+For targeted OpenRouter V1, V2, and VT checks, set `MODELSPELL_LIVE_OPENROUTER_MODEL` in
+addition to the key. The optional `MODELSPELL_LIVE_OPENROUTER_PROVIDER` is a strict manual
+override. Without it the checks use Automatic Balanced. V1 and V2 share a compatible pin.
+Streamed and non-streamed VT share their tool pin. Unpinned discovery, streaming and the
+owner checks remain available independently.
 
 Downstream projects should depend on the release wheel by URL and hash, e.g.
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.3.0/modelspell-0.3.0-py3-none-any.whl#sha256=<sha256>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.4.0/modelspell-0.4.0-py3-none-any.whl#sha256=<sha256>
 ```
 
 Releases are the supported install channel. Installing from an arbitrary commit

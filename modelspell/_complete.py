@@ -1,4 +1,7 @@
-"""complete(), supported_settings(), check_settings(): validation, route selection, extra merge, dispatch (spec §6)."""
+"""Ordinary completion, configuration checks, route selection and dispatch (spec §6).
+
+The dispatch and the opt-in HTTP 429 retry loop (spec v9 §6.11) are shared with complete_with_tools().
+"""
 from __future__ import annotations
 
 import math
@@ -7,10 +10,12 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 
 from . import _http
 from ._cancel import CancelHandle, _Stop, _Watch
+from ._json import _prepare_provider
 from ._routes import Acc, chat, lmstudio_native, responses
 from ._sse import iter_sse
-from ._types import KINDS, Endpoint, Message, ModelInfo, Result
-from .errors import AuthError, Cancelled, ConfigError, ModelSpellError, UnsupportedSetting
+from ._timing import _COMPLETION_TIMEOUT, _MAX_RETRY_WAIT, _check_retry_wait, _check_timeout
+from ._types import KINDS, Endpoint, Message, ModelInfo, Result, RetryEvent
+from .errors import AuthError, BackendError, Cancelled, ConfigError, ModelSpellError, UnsupportedSetting
 
 _REASONING = ("off", "low", "medium", "high")
 _MODEL_RULE = "model must be a non-empty str or a ModelInfo with a non-empty id"
@@ -24,7 +29,7 @@ def _num(value: Any) -> bool:
 
 
 def _finite(value: Any) -> bool:
-    """A number (not bool) that JSON can encode: ints always, floats unless inf/nan (v6 §6.8.3)."""
+    """A finite number (not bool), before the integer encoding check (v6 §6.8.3)."""
     return _num(value) and (isinstance(value, int) or math.isfinite(value))
 
 
@@ -104,6 +109,16 @@ def _unsupported_message(name: str, route: _Route) -> str:
     return f"{name} is not supported on {route.label}; pass it through extra"
 
 
+def _check_integer_encoding(name: str, value: int) -> None:
+    try:
+        int.__repr__(value)
+    except ValueError:
+        pass
+    else:
+        return
+    raise ConfigError(f"{name} exceeds Python's integer digit limit for JSON encoding")
+
+
 def _check_settings(kind: Any, reasoning: Any, settings: Mapping[str, Any], provider: Any) -> _Route:
     """The generation-setting checks (spec v6 §6.8.4), shared by check_settings() and complete()."""
     route = _check_kind_reasoning(kind, reasoning)
@@ -121,6 +136,8 @@ def _check_settings(kind: Any, reasoning: Any, settings: Mapping[str, Any], prov
             if (lo is not None and value < lo) or value > hi:
                 bounds = f"<= {hi}" if lo is None else f"between {lo} and {hi}"
                 raise ConfigError(f"{name} must be {bounds} on {route.label}")
+        if isinstance(value, int):
+            _check_integer_encoding(name, value)
     if provider is not None:
         if kind != "openrouter":
             raise UnsupportedSetting("provider routing is only supported on openrouter")
@@ -157,7 +174,7 @@ def check_settings(
     stop: list[str] | tuple[str, ...] | None = None,
     provider: Mapping[str, Any] | None = None,
 ) -> None:
-    """Run complete()'s generation-setting checks without an endpoint, key, environment or network.
+    """Run complete()'s generation and provider checks without an endpoint, key, environment or network.
 
     Raises the same ConfigError / UnsupportedSetting, with the same message, that complete() would
     raise for these settings; returns None when they all pass.
@@ -166,6 +183,18 @@ def check_settings(
         max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
         repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
         frequency_penalty=frequency_penalty, seed=seed, stop=stop), provider)
+    _prepare_provider(provider)
+
+
+def _message(item: Any) -> dict | None:
+    """One text message as its wire dict, or None if `item` is not a text message."""
+    if isinstance(item, Mapping):
+        if set(item) != {"role", "content"}:
+            raise ConfigError("a message mapping must have exactly the keys 'role' and 'content'")
+        item = Message(item["role"], item["content"])
+    elif not isinstance(item, Message):
+        return None
+    return {"role": item.role, "content": item.content}
 
 
 def _messages(input: Any) -> list[dict]:
@@ -175,13 +204,13 @@ def _messages(input: Any) -> list[dict]:
         raise ConfigError("input must be a str or a non-empty sequence of messages")
     out = []
     for item in input:
-        if isinstance(item, Mapping):
-            if set(item) != {"role", "content"}:
-                raise ConfigError("a message mapping must have exactly the keys 'role' and 'content'")
-            item = Message(item["role"], item["content"])
-        elif not isinstance(item, Message):
+        message = _message(item)
+        if message is None:
+            from ._tools import ToolOutput, ToolTurn  # deferred: _tools imports this module
+            if isinstance(item, (ToolTurn, ToolOutput)):
+                raise ConfigError(f"{type(item).__name__} entries need complete_with_tools(), not complete()")
             raise ConfigError(f"unsupported message item: {type(item).__name__}")
-        out.append({"role": item.role, "content": item.content})
+        out.append(message)
     return out
 
 
@@ -196,21 +225,100 @@ def _model_arg(model: Any) -> tuple[str, ModelInfo | None]:
     return model, None
 
 
-def _validate(endpoint, model, reasoning, settings, provider, extra, timeout, callbacks,
-              cancel=None) -> tuple[_Route, str, ModelInfo | None]:
+def _check_completion_config(
+    endpoint, model, reasoning, settings, provider, timeout, rate_limit_retries, max_retry_wait,
+) -> tuple[_Route, str, ModelInfo | None, dict | None]:
     if not isinstance(endpoint, Endpoint):
         raise ConfigError("endpoint must be an Endpoint")
     model_id, info = _model_arg(model)
     route = _check_settings(endpoint.kind, reasoning, settings, provider)
-    if extra is not None and (not isinstance(extra, Mapping) or {"model", "stream"} & set(extra)):
-        raise ConfigError("extra must be a mapping without the keys 'model' or 'stream'")
-    if not (_num(timeout) and timeout > 0):
-        raise ConfigError("timeout must be a number > 0")
-    if any(cb is not None and not callable(cb) for cb in callbacks):
-        raise ConfigError("on_text and on_reasoning must be None or callable")
-    if cancel is not None and not isinstance(cancel, CancelHandle):
-        raise ConfigError("cancel must be None or a CancelHandle")
-    return route, model_id, info
+    policy = _prepare_provider(provider)
+    _check_timeout(timeout)
+    _check_retry_limits(rate_limit_retries, max_retry_wait)
+    return route, model_id, info, policy
+
+
+# --- opt-in HTTP 429 recovery (spec v9 §6.11) ----------------------------------------------------
+_BACKOFF = (1.0, 2.0, 4.0)  # nominal wait before attempts 2, 3, 4
+MAX_RATE_LIMIT_RETRIES = len(_BACKOFF)
+
+
+def _check_retry_limits(rate_limit_retries: Any, max_retry_wait: Any) -> None:
+    if not (_int(rate_limit_retries) and 0 <= rate_limit_retries <= MAX_RATE_LIMIT_RETRIES):
+        raise ConfigError(f"rate_limit_retries must be an int from 0 to {MAX_RATE_LIMIT_RETRIES}")
+    _check_retry_wait(max_retry_wait)
+
+
+def _check_on_retry(on_retry: Any) -> None:
+    if on_retry is not None and not callable(on_retry):
+        raise ConfigError("on_retry must be None or callable")
+
+
+@dataclass(frozen=True)
+class _Retry:
+    retries: int
+    max_wait: float
+    on_retry: Callable[[RetryEvent], None] | None
+
+
+class _RetryCallbackError:
+    """Holds the exception on_retry raised, so dispatch tells it from the package's own errors."""
+    __slots__ = ("error",)
+
+    def __init__(self) -> None:
+        self.error: BaseException | None = None
+
+
+def _post(call: _http.Call, data: bytes, headers, watch: _Watch, retry: _Retry, holder: _RetryCallbackError):
+    """POST `data`, retrying a transport HTTP 429 when opted in. Nothing else is retried."""
+    attempt, waited = 1, 0.0
+    while True:
+        try:
+            return _http.post_data(call, data, headers, watch)
+        except BackendError as exc:
+            if not _http.is_transport_429(exc) or attempt > retry.retries:
+                raise
+            delay = max(_BACKOFF[attempt - 1], exc._retry_after or 0.0)
+            if waited + delay > retry.max_wait:
+                raise
+            watch.end_attempt()
+            if retry.on_retry is not None:
+                try:
+                    retry.on_retry(RetryEvent(attempt, attempt + 1, float(delay), exc.status))
+                except BaseException as cb_exc:
+                    holder.error = cb_exc
+                    raise
+            watch.pause(delay)
+            waited += delay
+            attempt += 1
+
+
+def _dispatch(call: _http.Call, data: bytes, headers, *, cancel, transport: str, on_text, on_reasoning,
+              retry: _Retry, parse: Callable[[Any, Acc, _Watch], Any]) -> Any:
+    """Send a prepared request through the watched transport and parse it (spec v8 §6.10, v9 §6.11)."""
+    # spec v8 §6.10, §9.6: every completion goes through the watched transport (M30-9). Without a
+    # handle the watch can never be cancelled. Pre-send errors above take precedence (M30-7).
+    watch = _Watch(cancel)
+    acc = Acc(transport, on_text, on_reasoning, watch)
+    holder = _RetryCallbackError()
+    try:
+        with watch:  # raises _Stop at once if the handle is already cancelled
+            response = _post(call, data, headers, watch, retry, holder)
+            try:
+                return parse(response, acc, watch)
+            finally:
+                response.close()
+    except Cancelled as exc:
+        if exc is acc.callback_error or exc is holder.error:  # raised by a callback (MS-5)
+            exc.partial, exc.sent = acc.partial(), watch.sent if exc is holder.error else True
+        raise
+    except _Stop:
+        raise _cancelled(call, acc, watch) from None
+    except ModelSpellError as exc:
+        if (exc is not acc.callback_error and exc is not holder.error
+                and watch.cancelled_before_commit()):
+            raise _cancelled(call, acc, watch) from None
+        raise
 
 
 def _cancelled(call: _http.Call, acc: Acc, watch: _Watch) -> Cancelled:
@@ -218,6 +326,41 @@ def _cancelled(call: _http.Call, acc: Acc, watch: _Watch) -> Cancelled:
     exc = call.error(Cancelled, "cancelled" if watch.sent else "cancelled before sending")
     exc.partial, exc.sent = acc.partial(), watch.sent
     return exc
+
+
+def check_completion(
+    endpoint: Endpoint,
+    model: str | ModelInfo,
+    *,
+    reasoning: Literal["off", "low", "medium", "high"] | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    min_p: float | None = None,
+    repetition_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    frequency_penalty: float | None = None,
+    seed: int | None = None,
+    stop: list[str] | tuple[str, ...] | None = None,
+    provider: Mapping[str, Any] | None = None,
+    timeout: float = _COMPLETION_TIMEOUT,
+    rate_limit_retries: int = 0,
+    max_retry_wait: float = _MAX_RETRY_WAIT,
+    **unknown: Any,
+) -> None:
+    """Check an ordinary completion's target, typed settings and transport options offline.
+
+    Raises as complete() would for those options. Unknown keywords take precedence.
+    Needs no credentials or messages and does not establish server or model acceptance.
+    """
+    if unknown:
+        raise ConfigError(f"unknown completion option: {min(unknown)}")
+    settings = dict(max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
+                    repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
+                    frequency_penalty=frequency_penalty, seed=seed, stop=stop)
+    _check_completion_config(endpoint, model, reasoning, settings, provider, timeout,
+                             rate_limit_retries, max_retry_wait)
 
 
 def complete(
@@ -238,16 +381,26 @@ def complete(
     stop: list[str] | tuple[str, ...] | None = None,
     provider: Mapping[str, Any] | None = None,
     extra: Mapping[str, Any] | None = None,
-    timeout: float = 900.0,
+    timeout: float = _COMPLETION_TIMEOUT,
     on_text: Callable[[str], None] | None = None,
     on_reasoning: Callable[[str], None] | None = None,
     cancel: CancelHandle | None = None,
+    rate_limit_retries: int = 0,
+    max_retry_wait: float = _MAX_RETRY_WAIT,
+    on_retry: Callable[[RetryEvent], None] | None = None,
 ) -> Result:
     settings = dict(max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
                     repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
                     frequency_penalty=frequency_penalty, seed=seed, stop=stop)
-    route, model_id, info = _validate(endpoint, model, reasoning, settings, provider, extra, timeout,
-                                      (on_text, on_reasoning), cancel)
+    route, model_id, info, policy = _check_completion_config(
+        endpoint, model, reasoning, settings, provider, timeout, rate_limit_retries, max_retry_wait)
+    if extra is not None and (not isinstance(extra, Mapping) or {"model", "stream"} & set(extra)):
+        raise ConfigError("extra must be a mapping without the keys 'model' or 'stream'")
+    if any(cb is not None and not callable(cb) for cb in (on_text, on_reasoning)):
+        raise ConfigError("on_text and on_reasoning must be None or callable")
+    if cancel is not None and not isinstance(cancel, CancelHandle):
+        raise ConfigError("cancel must be None or a CancelHandle")
+    _check_on_retry(on_retry)
     messages = _messages(input)
     key = endpoint._resolve_key()
     if endpoint.kind == "openrouter" and not key:
@@ -266,7 +419,7 @@ def complete(
     body_reasoning = reasoning
     if route.module is lmstudio_native and info is not None and not info.reasoning_options:
         body_reasoning = None
-    body = route.module.build_body(messages, model_id, reasoning=body_reasoning, provider=provider,
+    body = route.module.build_body(messages, model_id, reasoning=body_reasoning, provider=policy,
                                    settings={k: v for k, v in settings.items() if v is not None},
                                    streaming=streaming, kind=endpoint.kind)
     body.update(extra or {})
@@ -274,28 +427,14 @@ def complete(
     cap = cap if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1 else None
 
     call = _http.Call(url=url, key=key, timeout=timeout, model=model_id, route=route.hint)
-    # spec v8 §6.10, §9.6: every completion goes through the watched transport (M30-9). Without a
-    # handle the watch can never be cancelled. Pre-send errors above take precedence (M30-7).
-    watch = _Watch(cancel)
-    acc = Acc(route.module.TRANSPORT, on_text, on_reasoning, watch)
-    try:
-        with watch:  # raises _Stop at once if the handle is already cancelled
-            response = _http.post(call, body, endpoint.headers, watch)
-            try:
-                if not streaming:
-                    return route.module.parse_response(_http.read_json(call, response, watch=watch), call,
-                                                       kind=endpoint.kind, token_cap=cap)
-                return route.module.parse_stream(iter_sse(call, response, watch), acc, call,
-                                                 kind=endpoint.kind, token_cap=cap)
-            finally:
-                response.close()
-    except Cancelled as exc:
-        if exc is acc.callback_error:  # raised by a callback (MS-5): a response had arrived
-            exc.partial, exc.sent = acc.partial(), True
-        raise
-    except _Stop:
-        raise _cancelled(call, acc, watch) from None
-    except ModelSpellError as exc:
-        if exc is not acc.callback_error and watch.cancelled_before_commit():
-            raise _cancelled(call, acc, watch) from None
-        raise
+
+    def parse(response, acc: Acc, watch: _Watch) -> Result:
+        if not streaming:
+            return route.module.parse_response(_http.read_json(call, response, watch=watch), call,
+                                               kind=endpoint.kind, token_cap=cap)
+        return route.module.parse_stream(iter_sse(call, response, watch), acc, call,
+                                         kind=endpoint.kind, token_cap=cap)
+
+    return _dispatch(call, _http.encode(body), endpoint.headers, cancel=cancel, transport=route.module.TRANSPORT,
+                     on_text=on_text, on_reasoning=on_reasoning,
+                     retry=_Retry(rate_limit_retries, float(max_retry_wait), on_retry), parse=parse)

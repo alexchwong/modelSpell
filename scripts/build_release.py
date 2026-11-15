@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Build and verify the modelSpell release wheel from committed files.
 
-The wheel is the only release artifact. It is built from `git archive HEAD`, so uncommitted
-edits never leak in, and verified to contain exactly the `modelspell/` package plus metadata and
-LICENSE. Usage (from the repository root):
+The wheel comes from a committed source tree, which defaults to HEAD, and contains the
+`modelspell/` package plus metadata and LICENSE. Usage (from the repository root):
 
     python scripts/build_release.py [--output-dir dist] [--smoke] [--no-isolation]
     python scripts/build_release.py --changed-since v0.1.0   # exit 1 if shipped files changed
@@ -56,9 +55,9 @@ def check_news(tree: Path, version: str) -> None:
         fail(f"NEWS.md has no '## {version}' heading")
 
 
-def export_head(dest: Path) -> None:
+def export_head(dest: Path, commit: str = "HEAD") -> None:
     archive = dest / "head.tar"
-    git("archive", "--format=tar", f"--output={archive}", "HEAD")
+    git("archive", "--format=tar", f"--output={archive}", commit)
     with tarfile.open(archive) as tar:
         tar.extractall(dest / "src", filter="data")
 
@@ -116,6 +115,7 @@ def changed_since(tag: str) -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
+    parser.add_argument("--commit", default="HEAD", help="build this committed source tree")
     parser.add_argument("--smoke", action="store_true", help="install into a fresh venv and run the smoke test")
     parser.add_argument("--no-isolation", action="store_true",
                         help="build with the current environment's hatchling (offline builds)")
@@ -128,11 +128,12 @@ def main() -> None:
         print(f"shipped files {'changed' if changed else 'unchanged'} since {args.changed_since}")
         raise SystemExit(1 if changed else 0)
 
+    commit = git("rev-parse", "--verify", f"{args.commit}^{{commit}}").stdout.decode().strip()
     if git("status", "--porcelain").stdout.strip():
-        print("build_release: note: uncommitted changes are NOT included (building from HEAD)")
+        print("build_release: note: uncommitted changes are NOT included (building from committed source)")
     with tempfile.TemporaryDirectory(prefix="modelspell-release-") as tmp:
         scratch = Path(tmp)
-        export_head(scratch)
+        export_head(scratch, commit)
         src = scratch / "src"
         version = read_version(src)
         check_news(src, version)
@@ -145,7 +146,7 @@ def main() -> None:
         # copy rather than replace: the temp dir may be on another filesystem
         shutil.copy2(wheel, target)
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    print(f"built {target}\nsha256 {digest}")
+    print(f"source commit {commit}\nbuilt {target}\nsha256 {digest}")
 
 
 if __name__ == "__main__":

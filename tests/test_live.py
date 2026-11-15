@@ -3,6 +3,7 @@
 LM Studio:    MODELSPELL_LIVE_LMSTUDIO_URL, MODELSPELL_LIVE_LMSTUDIO_MODEL
 OpenRouter:   OPENROUTER_API_KEY, MODELSPELL_LIVE_OPENROUTER_MODEL, MODELSPELL_LIVE_OPENROUTER_PROVIDER (optional)
 llama-server: MODELSPELL_LIVE_LLAMASERVER_URL (including /v1), MODELSPELL_LIVE_LLAMASERVER_MODEL  (V2, owner checks)
+Tool round trips (VT): the same variables; run with -k vt -s.
 Owner checks: MODELSPELL_LIVE_PRESET (Quick, Cancellation, Usage, Full; default Full). Run with -s to see the record.
 Each call is checked on its own; live results are never compared with each other.
 """
@@ -13,7 +14,8 @@ import urllib.request
 import pytest
 
 from modelspell import (AuthError, BackendError, ConnectError, Endpoint, ModelSpellError, RequestTimeout,
-                        complete, list_models, list_providers, supported_settings)
+                        choose_provider, complete, list_models, list_providers, supported_settings)
+from scripts.provider_live import attribution
 
 pytestmark = pytest.mark.live
 LMS_URL, LMS_MODEL = os.environ.get("MODELSPELL_LIVE_LMSTUDIO_URL"), os.environ.get("MODELSPELL_LIVE_LMSTUDIO_MODEL")
@@ -74,23 +76,30 @@ def test_live_openrouter_discovery():
     assert list_providers(e, OR_MODEL)
 
 
+@pytest.fixture(scope="module")
+def or_ordinary():
+    endpoint = Endpoint("openrouter")
+    options = {"mode": "manual", "pin": OR_PROVIDER} if OR_PROVIDER is not None else {}
+    return choose_provider(endpoint, OR_MODEL, settings={"max_tokens": 64}, **options)
+
+
+@pytest.fixture(scope="module")
+def or_tools():
+    endpoint = Endpoint("openrouter")
+    options = {"mode": "manual", "pin": OR_PROVIDER} if OR_PROVIDER is not None else {}
+    return choose_provider(endpoint, OR_MODEL, tools=True, output_tokens=2048, **options)
+
+
 @need_or
-def test_live_v1_discovery_to_routing_round_trip():
-    """V1 (§17). Record the printed evidence in tests/fixtures/README.md."""
-    e = Endpoint(kind="openrouter")
-    providers = list_providers(e, OR_MODEL)
-    print("V1 entries:", [(p.name, p.slug, "tag" in p.raw, "provider_name" in p.raw) for p in providers])
-    by_name = {}
-    for p in providers:
-        by_name.setdefault(p.name, []).append(p.slug)
-    multi = [n for n, tags in by_name.items() if len(tags) > 1]
-    print("V1 providers with >=2 endpoints:", {n: by_name[n] for n in multi})
-    choice = next((p for p in providers if p.slug and p.name in multi), None) or \
-        next((p for p in providers if p.slug), None)
-    if choice is None:
-        pytest.skip("V1: no endpoint entry carries a tag")
-    r = complete(e, OR_MODEL, PROMPT, max_tokens=256, provider={"order": [choice.slug], "allow_fallbacks": False})
-    assert r.provider == choice.name, (r.provider, choice)
+def test_live_v1_discovery_to_routing_round_trip(or_ordinary):
+    e = Endpoint("openrouter")
+    choice = choose_provider(e, OR_MODEL, mode="manual", pin=or_ordinary.slug, provider=or_ordinary.policy)
+    r = complete(e, OR_MODEL, PROMPT, max_tokens=64, provider=choice.policy)
+    state, reason = attribution(choice.slug, choice.evidence["discovery"], r.provider, choice.evidence["scope"])
+    print("V1", choice.slug, r.provider, state, reason)
+    assert state != "conflicting"
+    if state == "unverified":
+        pytest.skip(reason)
 
 
 # --- V2 (spec v6 §17): backend compatibility of the generation-settings tables ---------------------
@@ -134,8 +143,8 @@ def _v2_attempt(endpoint, model, *, meta, setting, value, via="argument", **kw):
 def _v2_supported(endpoint, model, kind, reasoning, **meta):
     """V2 check 1: each supported setting once, at a non-default valid value, streaming."""
     base = dict(reasoning=reasoning) if reasoning is not None else {}
-    if kind == "openrouter" and meta.get("provider"):
-        base["provider"] = {"order": [meta["provider"]], "allow_fallbacks": False}
+    if kind == "openrouter" and meta.get("policy"):
+        base["provider"] = meta["policy"]
     records = []
     for name in sorted(supported_settings(kind, reasoning) - {"reasoning", "provider"}):
         kw = dict(base, max_tokens=V2_VALUES["max_tokens"])
@@ -144,13 +153,13 @@ def _v2_supported(endpoint, model, kind, reasoning, **meta):
     return records
 
 
-def _v2_extra(endpoint, model, cases, reasoning=None, provider_pin=None, **meta):
+def _v2_extra(endpoint, model, cases, reasoning=None, **meta):
     """V2 checks 2–4: values sent through extra, which bypasses modelSpell's checks."""
     base = dict(max_tokens=V2_VALUES["max_tokens"])
     if reasoning is not None:
         base["reasoning"] = reasoning
-    if provider_pin:
-        base["provider"] = {"order": [provider_pin], "allow_fallbacks": False}
+    if meta.get("policy"):
+        base["provider"] = meta["policy"]
     return [_v2_attempt(endpoint, model, setting=wire, value=value, via="extra", extra={wire: value}, meta=meta, **base)
             for wire, value in cases]
 
@@ -170,23 +179,17 @@ def _v2_fail_on_refusals(records):
 
 
 @need_or
-def test_live_v2_openrouter():
-    e = Endpoint(kind="openrouter")
-    providers = list_providers(e, OR_MODEL)
-    slugs = [p.slug for p in providers if p.slug]
+def test_live_v2_openrouter(or_ordinary):
+    e = Endpoint("openrouter")
     if OR_PROVIDER is not None:
-        assert OR_PROVIDER in slugs, (
-            f"MODELSPELL_LIVE_OPENROUTER_PROVIDER={OR_PROVIDER!r} does not match an available slug; "
-            f"available slugs: {slugs!r}")
-        pin, pin_source = OR_PROVIDER, "env"
-    else:
-        pin, pin_source = next(iter(slugs), None), "first_listed"
-    meta = dict(backend="openrouter", route="chat_completions", provider=pin, pin_source=pin_source)
+        complete(e, OR_MODEL, V2_PROMPT, provider=or_ordinary.policy, max_tokens=64)
+    meta = dict(backend="openrouter", route="chat_completions", provider=or_ordinary.slug,
+                pin_source=or_ordinary.evidence["pin_source"], policy=or_ordinary.policy)
     records = _v2_supported(e, OR_MODEL, "openrouter", None, **meta)
     ranges = [("temperature", 2), ("temperature", 2.01), ("repetition_penalty", 2), ("repetition_penalty", 2.01)]
     for name in ("presence_penalty", "frequency_penalty"):
         ranges += [(name, -2), (name, -2.01), (name, 2), (name, 2.01)]
-    _v2_extra(e, OR_MODEL, ranges, provider_pin=pin, **meta)
+    _v2_extra(e, OR_MODEL, ranges, **meta)
     _v2_require_acceptance(records)
     _v2_fail_on_refusals(records)
 
@@ -273,3 +276,90 @@ def test_live_owner_checks_lmstudio(route, lms_info):
 def test_live_owner_checks_llamaserver():
     from ui.owner_checks import Battery
     _owner_checks(Battery(Endpoint(kind="openai_compat", base_url=LLS_URL), LLS_MODEL, PRESET))
+
+
+# --- VT: tool-call round trips (spec v9 §17, §21.6) ---------------------------------------------------
+#
+# Each run prints one `VT {...}` JSON line per turn. Request acceptance and the observed model outcome
+# are recorded separately: a model that answers without calling verifies nothing (the test skips).
+# Failure injection (malformed arguments, unknown names) is covered offline by tests/test_tools.py;
+# a parser-built turn cannot be forged live.
+
+def _vt_tools():
+    from modelspell import ToolDefinition
+    obj = {"type": "object", "additionalProperties": False}
+    return [ToolDefinition("read_label", "Read the label of a fixture item. Always call this to learn a label.",
+                           {**obj, "properties": {"key": {"type": "string"}}, "required": ["key"]}),
+            ToolDefinition("write_note", "Write a note. Never needed for labels.",
+                           {**obj, "properties": {"text": {"type": "string"}}, "required": ["text"]})]
+
+
+VT_PROMPT = [{"role": "system", "content": "Use the read_label tool to answer. Answer in one word."},
+             {"role": "user", "content": "What is the label of item 007?"}]
+
+
+def _vt_record(**fields):
+    print("VT " + json.dumps(fields, sort_keys=True))
+
+
+def _vt_round_trip(endpoint, model, *, stream, backend, selection=None, **kw):
+    from modelspell import Message, ToolOutput, complete_with_tools
+    tools = _vt_tools()
+    stream_kw = {"on_text": lambda s: None} if stream else {}
+    meta = dict(backend=backend, model=model, stream=stream, reasoning=kw.get("reasoning"),
+                requested_provider=selection.slug if selection else None)
+    turn = complete_with_tools(endpoint, model, VT_PROMPT, tools=tools, max_tokens=2048, timeout=600,
+                               **stream_kw, **kw)
+    def record_attribution(number, result):
+        if selection is None:
+            return
+        state, reason = attribution(selection.slug, selection.evidence["discovery"], result.provider,
+                                    selection.evidence["scope"])
+        _vt_record(**meta, turn=number, attribution=state, reason=reason, reported=result.provider)
+        assert state != "conflicting", (selection.slug, result.provider)
+
+    record_attribution(1, turn.result)
+    _vt_record(**meta, turn=1, accepted=True, clean=turn.clean, finish=turn.result.finish_reason,
+               calls=[c.name for c in turn.tool_calls], served_by=turn.result.provider)
+    if not turn.tool_calls:
+        pytest.skip(f"{backend}: the model answered without a call (clean={turn.clean}); round trip not observed")
+    outputs = [ToolOutput(c.id, '{"label": "blue"}' if c.name == "read_label" else '{"error": "not allowed"}')
+               for c in turn.tool_calls]
+    history = [*VT_PROMPT, turn, *outputs]
+    follow = complete_with_tools(endpoint, model, history, tools=tools, max_tokens=2048, timeout=600,
+                                 **stream_kw, **kw)
+    record_attribution(2, follow.result)
+    _vt_record(**meta, turn=2, accepted=True, clean=follow.clean, finish=follow.result.finish_reason,
+               calls=[c.name for c in follow.tool_calls], text=follow.result.text[:80], served_by=follow.result.provider)
+    # narrower authorised set and a final-answer request with retained definitions (acceptance only)
+    narrowed = complete_with_tools(endpoint, model, [*history, Message("user", "Answer now in one word.")],
+                                   tools=tools[:1], max_tokens=2048, timeout=600, **stream_kw, **kw)
+    record_attribution(3, narrowed.result)
+    _vt_record(**meta, turn="narrowed_final", accepted=True, clean=narrowed.clean,
+               finish=narrowed.result.finish_reason, calls=[c.name for c in narrowed.tool_calls])
+    if selection is not None and (not follow.clean or follow.tool_calls
+                                  or follow.result.text.strip().casefold() != "blue"):
+        pytest.skip("OpenRouter continuation did not use the fixture result")
+    return turn, follow
+
+
+@need_lms
+@pytest.mark.parametrize("reasoning", [None, "high"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_live_vt_lmstudio(stream, reasoning):
+    _vt_round_trip(Endpoint(kind="lmstudio", base_url=LMS_URL), LMS_MODEL, stream=stream, backend="lmstudio",
+                   reasoning=reasoning)
+
+
+@need_or
+@pytest.mark.parametrize("stream", [False, True])
+def test_live_vt_openrouter(stream, or_tools):
+    e = Endpoint(kind="openrouter")
+    _vt_round_trip(e, OR_MODEL, stream=stream, backend="openrouter", selection=or_tools, provider=or_tools.policy)
+
+
+@need_lls
+@pytest.mark.parametrize("stream", [False, True])
+def test_live_vt_llamaserver(stream):
+    _vt_round_trip(Endpoint(kind="openai_compat", base_url=LLS_URL), LLS_MODEL, stream=stream,
+                   backend=f"llama-server {_llama_version()}")

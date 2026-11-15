@@ -5,7 +5,8 @@ import pathlib
 import pytest
 
 from conftest import KEY, MSGS, canned, ep, route_of
-from modelspell import (AuthError, CancelHandle, ConfigError, Endpoint, Message, ModelInfo, UnsupportedSetting, complete)
+from modelspell import (AuthError, CancelHandle, ConfigError, Endpoint, Message, ModelInfo, UnsupportedSetting,
+                        check_completion, complete)
 
 GOLDEN = {k: v for k, v in json.loads((pathlib.Path(__file__).parent / "golden/requests.json").read_text()).items()
           if not k.startswith("_")}
@@ -28,6 +29,7 @@ def run(server, kind, *, stream=False, input=MSGS, endpoint=None, **args):
 def test_r1_golden(server, name, handle):
     g = GOLDEN[name]
     extra = {"cancel": CancelHandle()} if handle else {}  # spec v8 §12.3: identical bodies with a handle
+    check_completion(ep(server, g["kind"]), "m", **{k: v for k, v in g["args"].items() if k != "extra"})
     req = run(server, g["kind"], stream=g["stream"], input=g.get("input", MSGS), **g["args"], **extra)
     assert req["method"] == "POST" and req["path"] == g["path"]
     assert req["body"] == {k: _sub(v) for k, v in g["body"].items()}
@@ -105,6 +107,12 @@ def test_r4_extra_overrides_last_and_never_changes_route(server):
     for bad in ({"model": "x"}, {"stream": True}):
         with pytest.raises(ConfigError):
             complete(ep(server, "openai_compat"), "m", "x", extra=bad)
+
+
+def test_r4_extra_replaces_the_entire_typed_provider(server):
+    typed = {"order": ["pinned"], "allow_fallbacks": False, "zdr": True}
+    replacement = {"order": ["replacement"]}
+    assert run(server, "openrouter", provider=typed, extra={"provider": replacement})["body"]["provider"] == replacement
 
 
 def test_r4_extra_overrides_new_settings_and_may_add_unsupported_fields(server):
@@ -195,9 +203,9 @@ def test_key_not_in_endpoint_repr():
     assert "api_key=None" in repr(Endpoint(kind="lmstudio"))
 
 
-def _info(options, id="m"):
+def _info(options, id="m", supports_reasoning=None):
     return ModelInfo(id=id, name=None, context_length=None, loaded=None, supports_tools=None,
-                     supports_reasoning=None, reasoning_options=options, pricing=None, raw={})
+                     supports_reasoning=supports_reasoning, reasoning_options=options, pricing=None, raw={})
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -205,6 +213,7 @@ def _info(options, id="m"):
 def test_r17ab_native_model_info(server, stream, options):
     expected = run(server, "lmstudio", stream=stream, reasoning="off")["body"]
     server.requests.clear()
+    check_completion(ep(server, "lmstudio"), _info(options), reasoning="off")
     complete(ep(server, "lmstudio"), _info(options), MSGS, reasoning="off", on_text=NOOP if stream else None)
     if not options:
         del expected["reasoning"]
@@ -240,15 +249,19 @@ def test_r17c_native_sampling_without_reasoning(server, stream):
 def test_r17d_other_routes_unchanged(server, stream, kind, reasoning):
     expected = run(server, kind, stream=stream, reasoning=reasoning)
     server.requests.clear()
-    complete(ep(server, kind), _info(None), MSGS, reasoning=reasoning, on_text=NOOP if stream else None)
+    model = _info(None, supports_reasoning=False)
+    check_completion(ep(server, kind), model, reasoning=reasoning)
+    complete(ep(server, kind), model, MSGS, reasoning=reasoning, on_text=NOOP if stream else None)
     assert len(server.requests) == 1
     assert server.requests[0]["path"] == expected["path"]
     assert server.requests[0]["body"] == expected["body"]
 
 
-@pytest.mark.parametrize("model", [_info(None, ""), _info(None, 123), 123, None])
+@pytest.mark.parametrize("model", [_info(None, ""), _info(None, 123), "", 123, None])
 def test_r17e_invalid_model(server, model):
     with pytest.raises(ConfigError) as exc:
         complete(ep(server, "lmstudio"), model, MSGS, reasoning="off")
-    assert str(exc.value) == "model must be a non-empty str or a ModelInfo with a non-empty id"
+    with pytest.raises(ConfigError) as preflight:
+        check_completion(ep(server, "lmstudio"), model, reasoning="off")
+    assert str(preflight.value) == str(exc.value) == "model must be a non-empty str or a ModelInfo with a non-empty id"
     assert server.requests == []

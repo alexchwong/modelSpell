@@ -1,4 +1,24 @@
 # NEWS
+
+## 0.4.0
+
+- Added `choose_provider()` for OpenRouter-managed routing, manual pins, and automatic Cheapest, Balanced or Fastest selection.
+- Added offline `check_completion()` for ordinary targets, generation settings, provider policies and transport options.
+- Timeouts require (0, 1,000,000] seconds. Retry waits allow zero with the same upper bound.
+- Ordinary OpenRouter policies now reject non-string keys and unsupported numeric subclasses.
+- Ordinary OpenRouter policies accept nested mappings and tuples, converting finite decimals to floats.
+- Integer generation settings that exceed Python's active JSON digit limit raise `ConfigError` before sending.
+- New `complete_with_tools()`: offer functions, receive complete calls, return results under the original call IDs.
+- New `ToolDefinition`, `ToolCall`, `ToolTurn` and `ToolOutput`; `ToolTurn.replay` shows exactly what continuation sends.
+- Tool calls are returned only on clean completion. Truncated and unfinished turns cannot be replayed.
+- New `check_tool_request()` checks route, settings, tools, provider pin and retry limits without a network call.
+- OpenRouter tool requests need a single-provider pin with fallbacks off; `require_parameters` is sent as true.
+- LM Studio tool turns use `/v1/responses` with `store: false`; `reasoning="off"` is refused for them.
+- `complete()` and `complete_with_tools()` accept `rate_limit_retries`, `max_retry_wait` and `on_retry` to retry HTTP 429.
+- Retries are off by default; each attempt resends identical bytes with the full timeout; Stop interrupts the wait.
+- New `RetryEvent(attempt, next_attempt, delay, status)`, passed to `on_retry` before each wait.
+- `complete()` refuses `ToolTurn` and `ToolOutput` entries with a `ConfigError` naming `complete_with_tools()`.
+
 ## 0.3.0
 - `complete()` accepts `cancel=CancelHandle()`; `cancel()` from any thread ends the call at any stage, including before the first token.
 - `Cancelled` gains `sent`: `False` means no part of the request was written before cancellation took effect.

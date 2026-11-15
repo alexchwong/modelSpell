@@ -32,10 +32,19 @@ from urllib.parse import parse_qs, urlparse
 import modelspell
 from modelspell import CancelHandle, Cancelled, Endpoint, ModelSpellError
 
+from modelspell._json import thaw
+
 from . import owner_checks
 
 INDEX = pathlib.Path(__file__).with_name("index.html")
-DEFAULT_SETTINGS = {"kind": "lmstudio", "base_url": "", "model": "", "provider": ""}
+DEFAULT_SETTINGS = {"kind": "lmstudio", "base_url": "", "model": "", "provider": "",
+                    "provider_mode": "managed", "provider_preset": "balanced", "balanced_min_tps": None}
+
+
+def _selection_options(settings):
+    mode = settings["provider_mode"]
+    return {"mode": mode, "pin": (settings["provider"] or None) if mode == "manual" else None,
+            "preset": settings["provider_preset"], "balanced_min_tps": settings["balanced_min_tps"]}
 # The generation arguments the page may send with /api/complete. provider comes from the dialog.
 PAGE_SETTINGS = ("reasoning", "max_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty",
                  "presence_penalty", "frequency_penalty", "seed", "stop")
@@ -154,6 +163,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": f"{', '.join(moved)}: moved to the request panel; "
                                              "send it with /api/complete"})
         new = {k: body.get(k, s.settings[k]) for k in DEFAULT_SETTINGS}
+        if "provider" in body and "provider_mode" not in body:
+            new["provider_mode"] = "manual" if new["provider"] else "managed"
+        if new["provider_mode"] not in ("managed", "manual", "automatic"):
+            return self._send(400, {"error": "invalid OpenRouter provider mode"})
         e = Endpoint(kind=new["kind"], base_url=new["base_url"] or None)  # validates kind/base_url
         if "api_key" in body and body["api_key"] is not None:
             if body["api_key"]:
@@ -186,13 +199,12 @@ class Handler(BaseHTTPRequestHandler):
         # Values pass to complete() unchanged; only null/absent are dropped and reasoning "" means None.
         # Never `value or None`: that would drop explicit zeros (U10). modelSpell does all value checks.
         kwargs = {k: v for k, v in settings.items() if v is not None and not (k == "reasoning" and v == "")}
-        if s["provider"] and endpoint.kind == "openrouter":
-            kwargs["provider"] = {"order": [s["provider"]], "allow_fallbacks": False}
         handle, request_id = CancelHandle(), secrets.token_urlsafe(9)
         with self.server.lock:
             self.server.handles[request_id] = handle
         try:
-            self._stream_complete(endpoint, s["model"], messages, kwargs, handle, request_id)
+            self._stream_complete(endpoint, s["model"], messages, kwargs, handle, request_id,
+                                  _selection_options(s) if endpoint.kind == "openrouter" else None)
         finally:
             with self.server.lock:
                 self.server.handles.pop(request_id, None)
@@ -203,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
-    def _stream_complete(self, endpoint, model, messages, kwargs, handle, request_id):
+    def _stream_complete(self, endpoint, model, messages, kwargs, handle, request_id, selection_options):
         self._ndjson_start()
         lock = threading.Lock()
 
@@ -217,12 +229,18 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             emit({"type": "started", "id": request_id})
+            if selection_options is not None:
+                selection = modelspell.choose_provider(endpoint, model, settings=kwargs, cancel=handle,
+                                                       output_tokens=kwargs.get("max_tokens") or 200,
+                                                       **selection_options)
+                if selection.policy is not None:
+                    kwargs["provider"] = selection.policy
             result = modelspell.complete(endpoint, model, messages,
                                          on_text=lambda t: emit({"type": "text", "text": t}),
                                          on_reasoning=lambda t: emit({"type": "reasoning", "text": t}),
                                          cancel=handle, **kwargs)
             # settings_sent: what was passed to complete() and sent, not a statement of what was applied
-            emit({"type": "result", "result": _jsonable(result), "settings_sent": kwargs})
+            emit({"type": "result", "result": _jsonable(result), "settings_sent": thaw(kwargs)})
         except Cancelled as exc:
             if not handle.cancelled:
                 return  # the browser disconnected: nothing to tell it
@@ -269,7 +287,8 @@ class Handler(BaseHTTPRequestHandler):
                        if b is not None and b.ended else "owner checks are already running")
                 return self._send(409, {"error": msg})
             battery = owner_checks.Battery(endpoint, srv.settings["model"], preset, route=route,
-                                           provider_pin=srv.settings["provider"] or None, **srv.battery_options)
+                                           selection_options=_selection_options(srv.settings)
+                                           if endpoint.kind == "openrouter" else None, **srv.battery_options)
             srv.battery = battery
             battery.start()
         self._ndjson_start()

@@ -1,0 +1,46 @@
+{
+ "id": "resp_t",
+ "object": "response",
+ "model": "m",
+ "status": "completed",
+ "output": [
+  {
+   "type": "reasoning",
+   "id": "rs_1",
+   "summary": [],
+   "content": [
+    {
+     "type": "reasoning_text",
+     "text": "Need the label."
+    }
+   ],
+   "encrypted_content": "opaque=="
+  },
+  {
+   "type": "message",
+   "id": "msg_1",
+   "role": "assistant",
+   "status": "completed",
+   "content": [
+    {
+     "type": "output_text",
+     "text": "Looking.",
+     "annotations": []
+    }
+   ]
+  },
+  {
+   "type": "function_call",
+   "id": "fc_1",
+   "call_id": "call_r1",
+   "name": "read_label",
+   "arguments": "{\"key\":\"007\"}",
+   "status": "completed"
+  }
+ ],
+ "usage": {
+  "input_tokens": 30,
+  "output_tokens": 9,
+  "total_tokens": 39
+ }
+}

@@ -1,6 +1,6 @@
 """Cancellation handle and per-call watch (spec v8 §6.10, §9.6).
 
-A CancelHandle is shared by the caller and any number of complete() calls. Each call creates a
+A CancelHandle is shared by the caller and any number of complete() and complete_with_tools() calls. Each call creates a
 private _Watch, which registers itself with the handle for the call's lifetime and holds a
 duplicate of every socket the call opens. cancel() sets the handle's flag and, under the handle's
 lock, shuts those duplicates down: a non-blocking operation that wakes whichever blocking socket
@@ -8,6 +8,7 @@ operation the calling thread is in. The lock is never held while caller code run
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import socket
 import threading
 
@@ -19,6 +20,7 @@ class CancelHandle:
         self._lock = threading.Lock()
         self._cancelled = False
         self._watches: set[_Watch] = set()
+        self._children: set[CancelHandle] = set()
 
     @property
     def cancelled(self) -> bool:
@@ -33,6 +35,20 @@ class CancelHandle:
             self._cancelled = True
             for watch in self._watches:
                 watch._abort_locked()  # shutdown() only: non-blocking
+            for child in self._children:
+                child.cancel()
+
+    @contextmanager
+    def _link(self, child: CancelHandle):
+        with self._lock:
+            if self._cancelled:
+                child.cancel()
+            self._children.add(child)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._children.discard(child)
 
     def __repr__(self) -> str:
         return f"CancelHandle(cancelled={self._cancelled})"
@@ -52,6 +68,7 @@ class _Watch:
         self.sent = False          # a byte of the completion request may have been written
         self._committed = False    # the call's ending is decided (spec v8 §6.10, commit point)
         self.in_connect = False    # inside connect(): proxy CONNECT bytes are not the request
+        self._wake = threading.Event()  # set by cancel(): ends a retry backoff (0.4.0)
 
     def _cancelled(self) -> bool:
         return self._h is not None and self._h._cancelled
@@ -119,9 +136,25 @@ class _Watch:
             self._committed = True
             return self._cancelled()
 
+    def pause(self, delay: float) -> None:
+        """Wait `delay` seconds between attempts (0.4.0 retry backoff); _Stop at once on cancellation."""
+        with self._lock:
+            if self._cancelled():
+                raise _Stop
+        if self._wake.wait(delay) or self._cancelled():
+            raise _Stop
+
+    def end_attempt(self) -> None:
+        """Close the duplicates of a finished attempt's sockets before the next attempt connects."""
+        with self._lock:
+            dups, self._dups = self._dups, []
+        for dup in dups:
+            dup.close()
+
     def _abort_locked(self) -> None:
         if self._committed:
             return
+        self._wake.set()
         for dup in self._dups:
             try:
                 dup.shutdown(socket.SHUT_RDWR)

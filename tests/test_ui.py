@@ -80,18 +80,36 @@ def test_u2_key_is_write_only_and_bound_to_its_endpoint(ui, make_server):
 
 
 def test_u3_complete_streams_events_matching_result(ui, server):
-    server.reply(sse_reply("chat/or_reasoning_synthetic.sse"))
-    configure(ui, server, kind="openrouter", api_key="k", provider="deepinfra/turbo")
+    server.reply(Reply(body=fx("discovery/openrouter_endpoints_synthetic.json")),
+                 sse_reply("chat/or_reasoning_synthetic.sse"))
+    configure(ui, server, kind="openrouter", api_key=KEY, provider="deepinfra/turbo", model="a/model-one")
     evs = events(request(ui, "/api/complete", {"prompt": "task", "system": "sys",
                                                "settings": {"reasoning": "high", "max_tokens": 64}}, raw=True))
     result = evs[-1]["result"]
     assert evs[-1]["type"] == "result"
     assert "".join(e["text"] for e in evs if e["type"] == "text") == result["text"] == "ans"
     assert "".join(e["text"] for e in evs if e["type"] == "reasoning") == result["reasoning"]
-    body = server.requests[0]["body"]
+    body = server.requests[1]["body"]
     assert body["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
     assert body["provider"] == {"order": ["deepinfra/turbo"], "allow_fallbacks": False}
     assert body["reasoning"] == {"effort": "high"} and body["max_tokens"] == 64 and body["stream"] is True
+
+
+def test_automatic_ui_uses_shared_selector_and_effective_pin(ui, server):
+    def row(tag, speed, price):
+        return {"tag": tag, "provider_name": tag, "throughput_last_30m": {"p50": speed},
+                "pricing": {"prompt": price, "completion": price}}
+
+    discovery = {"data": {"endpoints": [row("too-slow", 100, "0"), row("fast/route", 120, "0.0000001")]}}
+    server.reply(Reply(body=json.dumps(discovery).encode()), canned("chat", False), canned("chat", True))
+    configure(ui, server, kind="openrouter", api_key=KEY, model="a/model-one",
+              provider_mode="automatic", balanced_min_tps=100)
+    result = complete_with(ui, {"max_tokens": 64})[-1]
+    assert result["type"] == "result"
+    assert [r["method"] for r in server.requests] == ["GET", "POST", "POST"]
+    probe, actual = [r["body"] for r in server.requests[1:]]
+    assert probe["provider"] == actual["provider"] == {"order": ["fast/route"], "allow_fallbacks": False}
+    assert probe["messages"] != actual["messages"]
 
 
 def test_u4_backend_error_is_an_error_event(ui, server):
@@ -139,10 +157,10 @@ def complete_with(ui, settings, **body):
 
 
 def test_u6_openrouter_all_settings_reach_the_body(ui, server):
-    server.reply(canned("chat", True))
-    configure(ui, server, kind="openrouter", api_key="k", provider="deepinfra/turbo")
+    server.reply(Reply(body=fx("discovery/openrouter_endpoints_synthetic.json")), canned("chat", True))
+    configure(ui, server, kind="openrouter", api_key=KEY, provider="deepinfra/turbo", model="a/model-one")
     evs = complete_with(ui, ALL_PAGE)
-    body = server.requests[0]["body"]
+    body = server.requests[1]["body"]
     for name, value in ALL_PAGE.items():
         if name != "reasoning":
             assert body[name] == value, name

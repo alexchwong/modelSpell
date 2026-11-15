@@ -11,7 +11,7 @@ modelSpell is a **controlled adaptation** of the completion client in [NEL](http
 Install from a [GitHub release](https://github.com/alexchwong/modelSpell/releases). Each release attaches one wheel and gives its sha256 in the notes. In a downstream `pyproject.toml` or requirements file, pin it by URL and hash:
 
 ```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.3.0/modelspell-0.3.0-py3-none-any.whl#sha256=<sha256 from the release notes>
+modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.4.0/modelspell-0.4.0-py3-none-any.whl#sha256=<sha256 from the release notes>
 ```
 
 The wheel contains only the library; it has no dependencies and needs no build step. Releases are the supported install channel; installing from an arbitrary commit is unsupported. `modelspell.__version__` reports the installed version. Licensed under MIT (`LICENSE`).
@@ -22,15 +22,22 @@ Development, tests, the developer test UI and the release process are described 
 
 ```python
 from modelspell import (
-    complete, list_models, list_providers, supported_settings, check_settings,
-    Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing, CancelHandle,
+    complete, complete_with_tools, list_models, list_providers, supported_settings, check_settings,
+    check_completion, check_tool_request, choose_provider,
+    ProviderSelection, ProviderSelectionError,
+    Endpoint, Message, Result, Usage, ModelInfo, ProviderInfo, Pricing,
+    ToolDefinition, ToolCall, ToolTurn, ToolOutput, RetryEvent, CancelHandle,
     ModelSpellError, ConfigError, UnsupportedSetting, UnsupportedOperation,
     AuthError, ConnectError, RequestTimeout, BackendError, ResponseFormatError, Cancelled,
 )
 ```
 
 - `Endpoint(kind, base_url=None, api_key=None, api_key_env=None, headers=None)` — `kind` is `"lmstudio"`, `"openrouter"` or `"openai_compat"`. `base_url` is the OpenAI-compatible root **including `/v1`** (defaults: `http://localhost:1234/v1`, `https://openrouter.ai/api/v1`; required for `openai_compat`). OpenRouter's `api_key_env` defaults to `OPENROUTER_API_KEY`.
-- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. `None` arguments are **not sent**; zero is a value and is sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None, rate_limit_retries=0, max_retry_wait=30.0, on_retry=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. Generation settings and `provider` set to `None` are omitted. Supported zero values are sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `check_completion(endpoint, model, *, <generation settings>, provider=None, timeout=900.0, rate_limit_retries=0, max_retry_wait=30.0) -> None` — offline preflight for ordinary completions.
+- `complete_with_tools(endpoint, model, input, *, tools, ...) -> ToolTurn` and `check_tool_request(kind, *, tools, ...) -> None` — client-executed function calling; see [Tool calling](#tool-calling).
+- `choose_provider(endpoint, model, ...)` — resolve an OpenRouter routing policy and return its selection evidence. See [OpenRouter provider selection](#openrouter-provider-selection).
+- `rate_limit_retries`, `max_retry_wait`, `on_retry` — opt-in recovery from HTTP 429 on both completion functions; see [HTTP 429 recovery](#http-429-recovery).
 - `CancelHandle()` — pass it as `complete(..., cancel=handle)` and call `handle.cancel()` from any thread to end the call at any stage; see [Cancellation](#cancellation).
 - `supported_settings(kind, reasoning=None) -> frozenset[str]` and `check_settings(kind, *, reasoning=None, max_tokens=None, …, provider=None) -> None` — pure helpers for the generation settings; see below.
 - `list_models(endpoint, *, timeout=15.0) -> list[ModelInfo]` (all kinds) and `list_providers(endpoint, "author/slug", *, timeout=15.0) -> list[ProviderInfo]` (OpenRouter only). No caching.
@@ -46,7 +53,7 @@ from modelspell import (
 | `openrouter` | any | `chat_completions` | `{base_url}/chat/completions` (`off` → `{"effort": "none"}`) |
 | `openai_compat` | `None` only | `chat_completions` | `{base_url}/chat/completions` |
 
-One `complete()` call makes exactly one HTTP request: no retries, no route fallback, no streaming→non-streaming fallback. `reasoning` on `openai_compat`, `provider` on non-OpenRouter kinds, and any sampling argument a route does not send raise `UnsupportedSetting`.
+One `complete()` call makes exactly one HTTP request by default: no retries unless you opt in to [HTTP 429 recovery](#http-429-recovery), no route fallback, no streaming→non-streaming fallback. `reasoning` on `openai_compat`, `provider` on non-OpenRouter kinds, and any sampling argument a route does not send raise `UnsupportedSetting`.
 
 Minimum LM Studio versions: **0.3.29** for `/v1/responses`; **0.4.0** for `reasoning="off"` and for `list_models`.
 
@@ -67,7 +74,7 @@ The *generation settings* are `reasoning`, `max_tokens`, `temperature`, `provide
 | `frequency_penalty` | `frequency_penalty` (−2 to 2) | — | — | `frequency_penalty` |
 | `seed` | `seed` | — | — | `seed` |
 | `stop` | `stop` (array) | — | — | `stop` (array) |
-| `provider` | `provider` (verbatim) | — | — | — |
+| `provider` | `provider` (normalized JSON) | — | — | — |
 
 The table shows what modelSpell **sends**, not what a server applies.
 
@@ -93,37 +100,37 @@ With a string model, `reasoning="off"` still sends the field, and LM Studio refu
 **`openai_compat`.** `top_p`, `presence_penalty`, `frequency_penalty`, `seed` and `stop` are part of the standard Chat Completions shape. `top_k` and `min_p` are **extensions** (llama-server and vLLM use these names); a server that does not know them may refuse or ignore them. `repetition_penalty` is **not sent** on `openai_compat`, because servers disagree on its name (llama-server `repeat_penalty`, vLLM `repetition_penalty`); pass the right name through `extra` if you know your server.
 
 **Sent is not applied.** modelSpell guarantees only that a supported setting is *sent* under the right name. Whether it is applied depends on the backend, the model and, on OpenRouter, the provider:
-- On OpenRouter, a provider that does not support a parameter ignores it by default, with no error, even with a pinned provider and `allow_fallbacks: false`. Adding `"require_parameters": True` to `provider=` makes OpenRouter route only to providers that *declare* support for every parameter in the request. That establishes declared support, not proof that every sampler changes every model's output. modelSpell passes `provider` verbatim and never adds this flag itself.
+- On OpenRouter, a provider that does not support a parameter ignores it by default, with no error, even with a pinned provider and `allow_fallbacks: false`. Adding `"require_parameters": True` to `provider=` makes OpenRouter route only to providers that *declare* support for every parameter in the request. That establishes declared support, not proof that every sampler changes every model's output. Ordinary completion sends only the fields supplied in the typed policy.
 - On `openai_compat`, a server that does not know a field may refuse or ignore it.
 - On LM Studio's native route, behaviour for a model that cannot use a setting is undocumented.
 - On LM Studio's Responses route, LM Studio accepts fields without error whether or not it uses them, so neither acceptance nor modelSpell's support says a setting is applied.
 
 Nothing modelSpell returns claims a setting was applied.
 
-**`extra` still wins.** `extra` is merged last and can override a value the checks approved, or add fields a route does not send. That is unchanged from 0.1.0 and unvalidated.
+**Ordinary OpenRouter policy.** Typed `provider` accepts nested string-keyed mappings and list or tuple arrays. modelSpell takes a detached copy, preserves field order and values, and converts finite `Decimal` values to floats at standard JSON precision. Cycles, non-string keys, unsupported values and numeric subclasses, non-finite numbers and values the standard JSON encoder cannot represent raise `ConfigError`. An explicit empty mapping sends `{}`. Tool calls made directly use their exact encoder and retain finite `Decimal` values, including values outside the float range.
 
-#### `supported_settings()` and `check_settings()`
+### Offline preflight
 
-Both are pure: no endpoint, no key, no environment, no network. Both raise what `complete()` would raise for the same `kind` and `reasoning` (`ConfigError` for unknown values, `UnsupportedSetting` for `reasoning` on `openai_compat`).
+The three preflights run without credential lookup, environment access, discovery or network I/O. Server acceptance and model-specific requirements remain runtime concerns.
 
 - `supported_settings(kind, reasoning)` returns the names modelSpell sends on the route for that `kind` and `reasoning`, e.g. `supported_settings("lmstudio", "off")` → `{"reasoning", "max_tokens", "temperature", "top_p", "top_k", "min_p", "repetition_penalty"}`. It says nothing about what a model or provider applies.
-- `check_settings(kind, *, reasoning=..., max_tokens=..., ..., provider=...)` runs exactly `complete()`'s generation-setting checks, from the same code, and raises the same exception with the same message. It does not check the endpoint, model, input, `extra`, `timeout` or callbacks, and never raises `AuthError`.
+- `check_settings(kind, ...)` checks the route, generation values and typed provider JSON for an ordinary completion when only the endpoint kind is available.
+- `check_completion(endpoint, model, ...)` checks the endpoint and model ID, then the route, generation settings and typed provider JSON, then timeout and retry bounds. An unknown keyword raises `ConfigError` first. With several invalid arguments, `complete()` reports typed configuration failures before call-time checks of `extra`, callbacks, cancellation and input, followed by credential lookup.
+- `check_tool_request(kind, ...)` checks the route, generation settings, tool definitions, provider pin and retry bounds. `complete_with_tools()` also checks timeout and the transcript at call time.
 
-Use `check_settings()` when you must refuse bad settings before committing to something, such as an HTTP status for a streamed response:
+Use `check_completion()` to refuse an invalid resolved request before starting a streamed response.
 
 ```python
-from modelspell import ConfigError, UnsupportedSetting, check_settings, complete
+from modelspell import ConfigError, UnsupportedSetting, check_completion, complete
 
 def handle(endpoint, model, prompt, settings, respond):
     try:
-        check_settings(endpoint.kind, **settings)        # same kwargs you will pass to complete()
+        check_completion(endpoint, model, **settings)
     except (ConfigError, UnsupportedSetting) as exc:
-        return respond.status(400, str(exc))             # nothing sent upstream, no stream started
+        return respond.status(400, str(exc))
     stream = respond.start_stream(200)
-    complete(endpoint, model, prompt, on_text=stream.write, **settings)   # will not refuse these settings
+    complete(endpoint, model, prompt, on_text=stream.write, **settings)
 ```
-
-A pass means `complete()` will not refuse those settings. `complete()` can still raise for anything else: an invalid endpoint, a missing OpenRouter key, `extra`, or any error after sending.
 
 ### Per-subtask configuration
 
@@ -156,9 +163,61 @@ Both raise `ConfigError` before sending; nothing else changes for calls that use
 1. **Non-finite numbers.** `temperature=float("inf")` now raises. In 0.1.0 it produced an invalid JSON body (`Infinity`); NaN was already refused.
 2. **Documented `temperature` ranges.** Above 2 on OpenRouter, or above 1 on LM Studio's native route (`reasoning="off"`), now raises. Before, the backend decided.
 
+## Tool calling
+
+`complete_with_tools()` sends one model turn that offers a set of functions, and returns a `ToolTurn`. modelSpell never runs, authorises or schema-checks a call: you validate each call, dispatch it yourself and send back its result (or a validation error) under the original call ID.
+
+```python
+from modelspell import Message, ToolDefinition, ToolOutput, complete_with_tools
+
+tools = [ToolDefinition("read_label", "Read the fixture label.", {
+    "type": "object",
+    "properties": {"key": {"type": "string"}},
+    "required": ["key"],
+    "additionalProperties": False,
+})]
+history = [Message("user", "Read the label for item 007.")]
+turn = complete_with_tools(endpoint, model, history, tools=tools, cancel=stop)
+
+# you have validated and authorised the one returned call
+(call,) = turn.tool_calls
+follow_up = complete_with_tools(
+    endpoint, model, [*history, turn, ToolOutput(call.id, '{"label":"blue"}')],
+    tools=tools, cancel=stop,
+)
+```
+
+These are two separate model turns. Inspect `follow_up` for text, more calls or truncation.
+
+- **Types.** `ToolDefinition(name, description, parameters)`: `name` matches `^[A-Za-z0-9_-]{1,64}$`; `parameters` is a JSON Schema object, validated and deep-copied into a read-only snapshot when the definition is made. Ints and finite `Decimal` values are sent with their exact digits; non-finite numbers, cycles, non-string keys and other types raise `ConfigError`. `ToolCall(id, name, arguments_json)` holds the provider's call ID, name and argument string **verbatim**, invalid JSON included. `ToolOutput(call_id, content)` is your non-empty text result.
+- **`ToolTurn`.** `result` (the usual `Result`), `tool_calls`, `replay` (a read-only snapshot of exactly what will be sent back on continuation), `route_identity` and `clean`. A **clean** turn finished properly: its calls can be dispatched and the turn appended to history. A **diagnostic** turn (`clean is False`) — truncated, filtered or otherwise not cleanly finished — has `tool_calls == ()` and `replay is None` even if the backend sent complete-looking calls, and is refused if you append it. `ToolTurn` is made only by modelSpell; copies replay fine, pickling is not supported.
+- **History.** Pass a list of `Message`s, `ToolTurn`s and `ToolOutput`s. Every call of a tool-call turn needs exactly one `ToolOutput` before the next message or request; they may be in any order and are sent in call order. Missing, duplicate, orphaned or unknown outputs raise `ConfigError` before anything is sent. `complete()` refuses `ToolTurn` and `ToolOutput` entries.
+- **One route per conversation.** A turn replays only on the same kind, base URL, model, transport, reasoning setting and provider policy it came from; anything else raises `ConfigError`. Rotating the API key is fine.
+- **Settings.** The named generation settings, `timeout`, `on_text` / `on_reasoning` (either enables streaming), `cancel` and the 429 options all work as in `complete()`. There is no `extra=`. Every request needs a non-empty `tools`; for a final-answer turn, resend the definitions with the outputs.
+- **Preflight.** `check_tool_request(kind, *, tools, reasoning=None, provider=None, rate_limit_retries=0, max_retry_wait=30.0, <generation settings>)` runs the route, setting, tool, provider-pin and retry checks with no endpoint, key, transcript or network, and raises what `complete_with_tools()` would.
+- **Stop.** Cancellation ends the call with `Cancelled` and exposes no calls. Check your own Stop again before dispatching and before the next request.
+
+| Backend | Route | Notes |
+|---|---|---|
+| OpenRouter | Chat Completions | **Every tool request needs an explicit pin**: `provider={"order": ["<one slug>"], "allow_fallbacks": False}` (a base or qualified slug; `only`, if given, must be that slug; `ignore` must not exclude it). modelSpell adds `require_parameters: true` on a copy (an explicit `false` is refused). `reasoning_details` (else the reasoning text) is sent back on continuation. |
+| LM Studio | `/v1/responses`, `store: false`, full output items replayed in order (opaque reasoning fields included) | `reasoning="off"` (the native route) is refused for tool turns. Ordinary text requests keep their old body. |
+| llama-server (`openai_compat`) | Chat Completions | Depends on the server build, model and a tool-capable chat template. Reasoning is kept in `result` but not sent back. |
+
+**Verification.** Synthetic fixtures cover the request and response formats, completed-turn rules and replay. Live verification applies to the backend, model and policy exercised in a passing tool round trip (VT). See the [live evidence record](tests/fixtures/README.md#tool-round-trips-vt-spec-v9-17--040) and the gate report attached to the 0.4.0 release. Discovery hints such as `ModelInfo.supports_tools` are advisory.
+
+## HTTP 429 recovery
+
+`complete()` and `complete_with_tools()` accept `rate_limit_retries` (an int from 0 to 3; default 0, one request), `max_retry_wait` (0 through 1,000,000 seconds, default 30.0) and `on_retry` (a callback, default `None`).
+
+- Only an HTTP 429 status on the request itself is retried, before any output arrives. Every other failure — other statuses, malformed responses, timeouts, connection errors, an error inside a stream — is raised at once. When retries run out you get the last `BackendError(status=429)`.
+- The wait before each retry is the larger of 1, 2, then 4 seconds and a valid `Retry-After`. If the next wait would take the total past `max_retry_wait`, the last 429 is raised at once, so `max_retry_wait=0` means no retries.
+- Every attempt sends the same body to the same destination with the same routing policy and gets the full `timeout`. A run deadline is yours to enforce, through a `CancelHandle`, which also interrupts the wait.
+- `on_retry` receives `RetryEvent(attempt, next_attempt, delay, status)` before each wait. The event reports a scheduled retry, which cancellation can stop before it is sent. Exceptions from the callback propagate and end the call.
+- With paid-request budgets, reserve up to `1 + rate_limit_retries` attempts per call. A retry may recover a temporary admission failure; it says nothing about whether the limit is shared capacity or your account.
+
 ## Behaviour you should know about
 
-**`extra` is a raw escape hatch.** The request bodies modelSpell builds are defaults. `extra` is merged last with a shallow `dict.update` and may override anything except `model` and `stream` (e.g. `max_tokens`, `reasoning`, `store`, `messages`/`input`). Its keys are not validated; overriding `messages`/`input` bypasses message validation and native flattening. Anything sent through `extra` is the caller's responsibility. `extra` never changes the route.
+**`extra` is a raw escape hatch.** The request bodies modelSpell builds are defaults. `extra` is merged last with a shallow `dict.update` and may override anything except `model` and `stream` (e.g. `max_tokens`, `reasoning`, the entire `provider` policy, `store`, `messages`/`input`). The ordinary preflights cover typed fields only. AgentWiz passes typed profile settings without forwarding user-configured `extra`. Its keys are not validated; overriding `messages`/`input` bypasses message validation and native flattening. Anything sent through `extra` is the caller's responsibility. `extra` never changes the route.
 
 **`reasoning="off"` on LM Studio changes three things.**
 1. *Protocol*: LM Studio's native `/api/v1/chat`, not the Responses API.
@@ -169,7 +228,7 @@ Both raise `ConfigError` before sending; nothing else changes for calls that use
 
 **Native-route truncation is a heuristic.** That API reports no stop reason, so `finish_reason` is always `None` there, and `truncated` is `output_tokens >= cap`, where the cap is `max_output_tokens` from the final request body (after `extra`). False positive: a response that ends naturally at exactly the cap reports `truncated=True`. False negative: if the backend reports no usage, `truncated` is `False` even when output was cut.
 
-**Timeouts.** `timeout` (default 900 s) applies to the connection and to each socket read. Streaming makes it an *idle* timeout. A non-streamed request receives nothing until generation finishes, so `timeout` then bounds prefill plus the whole generation (16k tokens at ~20 tok/s ≈ 800 s). **Stream long local generations** — a no-op callback (`on_text=lambda s: None`) is enough.
+**Timeouts.** Completion, discovery and selection accept non-boolean integers or finite floats in `0 < timeout <= 1_000_000` seconds. `max_retry_wait` uses the same types and upper bound and accepts zero. An explicit `None` for a timeout or retry option raises `ConfigError`. Completion `timeout` (default 900 s) applies to the connection and to each socket read. Streaming makes it an *idle* timeout. A non-streamed request receives nothing until generation finishes, so `timeout` then bounds prefill plus the whole generation (16k tokens at ~20 tok/s ≈ 800 s). **Stream long local generations** — a no-op callback (`on_text=lambda s: None`) is enough.
 
 **Redirects are not followed.** urllib's default handler would forward `Authorization` to the redirect target and turn POST into GET. A 3xx raises `BackendError` naming the target; set `base_url` to the final URL (e.g. `https://` if an `http://` URL redirects). Proxies (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`) are honoured.
 
@@ -242,6 +301,63 @@ It covers servers that accept the Chat Completions request shape and return stan
 ### Discovery notes
 
 `ProviderInfo.slug` is OpenRouter's endpoint `tag`, passed verbatim (case and `/` suffix kept) for use in `provider={"order": [slug]}` or `"only"`; it is `None` when absent and never derived from the display name. You can always pass a known slug directly without calling `list_providers()`.
+
+## OpenRouter provider selection
+
+`choose_provider(endpoint, model, *, mode="automatic", pin=None, provider=None,
+preset="balanced", balanced_min_tps=None, tools=False, settings=None, input_tokens=600,
+output_tokens=200, timeout=30, max_attempts=4, cancel=None)` returns a frozen
+`ProviderSelection(slug, policy, evidence)`.
+
+| Mode | Behaviour |
+|---|---|
+| `managed` | Return the optional native policy for ordinary completions. OpenRouter chooses the route. |
+| `manual` | Validate the pin against published tags or provider scope and send the requested slug verbatim with fallbacks disabled. |
+| `automatic` | Discover, rank and confirm a specific published route with a short synthetic request. |
+
+Automatic `cheapest` ranks by request cost above 20 tokens/s. `balanced` ranks by cost above
+50 tokens/s, or the supplied `balanced_min_tps`. `fastest` ranks by estimated time to first
+token plus output time. Cost uses the input and output token estimates, published prices,
+and any published request charge or separate discount. Routes exactly at the floor are excluded.
+
+```python
+from modelspell import Endpoint, check_completion, choose_provider, complete
+
+endpoint = Endpoint("openrouter")
+model = "openai/gpt-oss-120b"
+generation = {"max_tokens": 128}
+transport = {"timeout": 120.0, "rate_limit_retries": 2}
+policy = {"zdr": True}
+check_completion(endpoint, model, provider=policy, **generation, **transport)
+
+# The host has already authorized the workload and its budgets.
+selection = choose_provider(
+    endpoint, model, provider=policy, settings=generation, timeout=30.0, max_attempts=2,
+)
+result = complete(endpoint, model, "Say hello.", provider=selection.policy, **generation, **transport)
+```
+
+- Preflight the base policy before optional selection so invalid completion configuration cannot trigger discovery or a probe. Pass `selection.policy` directly to the completion. For a known policy or a local or OpenAI-compatible endpoint, preflight and complete directly.
+- Authorize network access and spending before discovery or completion. Selection has its own deadline and attempt budget of up to four synthetic probes. Budget these separately from the real completion's attempts.
+- Set `tools=True`
+  when selecting for `complete_with_tools()`. Tool workflows use Manual or Automatic and keep the
+  same effective policy throughout replay. A tool-shaped probe offers an inert tool and executes
+  no tool.
+- `settings` contains the intended generation keyword arguments. Set token estimates for the
+  expected workload. The selector uses a 64-token probe cap when `max_tokens` is omitted.
+- Automatic accepts `only`, `ignore`, `quantizations`, `max_price`, `zdr`, `data_collection`,
+  `require_parameters`, and `allow_fallbacks=False`. OpenRouter remains authoritative for account
+  restrictions. Price caps use USD per million prompt or completion tokens, or USD per request or image.
+- Accounts enforcing ZDR can pass `{"zdr": True}` to activate the optional catalogue shortlist.
+  All fallback probes retain the ZDR policy. Catalogue membership and Safety Retention are recorded
+  separately.
+- Reuse a selection for one conversation or compatible run. Resolve it again when the endpoint,
+  credential, model, policy or requirements change. Failures after selection surface to the caller.
+  See [the batch example](examples/batch_selection.py). Record `selection.slug` as the requested endpoint tag when present, `Result.provider` as the real completion's reported label, and the Automatic probe's reported label in the selection evidence. Use `json.dumps(selection.policy, default=dict)` to record the immutable JSON-safe policy.
+- Invalid local arguments use `ConfigError` or the completion preflight's setting errors.
+  `ProviderSelectionError.reason` and `.evidence` expose bounded observations from failed selection.
+  Caller cancellation raises `Cancelled`. Deadline expiry raises `ProviderSelectionError` with
+  reason `deadline expired`. Operating-system DNS can delay return past the deadline.
 
 ## Deviations from NEL
 

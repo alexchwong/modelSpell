@@ -7,7 +7,7 @@ from typing import Any
 from . import Acc, id_or_none, make_result, str_or_none
 from .._reasoning import _text_fragment
 from .._usage import parse_usage
-from ..errors import BackendError
+from ..errors import BackendError, ResponseFormatError
 
 TRANSPORT = "responses"
 _TERMINAL = {"response.completed", "response.incomplete", "response.failed"}
@@ -129,3 +129,204 @@ def parse_stream(events, acc: Acc, call, *, kind, token_cap) -> object:
     else:
         raise call.error(BackendError, "stream ended before completion")
     return acc.result(**fields, **_usage_fields(raw_usage))
+
+
+# --- tool turns (0.4.0) -----------------------------------------------------------------------------
+# Stateless replay (spec v9 §21): complete output items are sent back as input items in their
+# original order, with store: false. The terminal status decides whether a turn is clean.
+_REPLAY_TYPES = ("message", "function_call", "reasoning")
+_TERMINAL_STATUS = {"response.completed": "completed", "response.incomplete": "incomplete"}
+
+
+def build_tool_body(entries, model, *, reasoning, provider, settings, streaming, kind, tools) -> dict:
+    items: list = []
+    for tag, value in entries:
+        if tag == "message":
+            items.append(value)
+        elif tag == "turn":
+            items.extend(value.replay)
+        else:
+            items.append({"type": "function_call_output", "call_id": value.call_id, "output": value.content})
+    body = build_body(items, model, reasoning=reasoning, provider=provider, settings=settings,
+                      streaming=streaming, kind=kind)
+    body["store"] = False
+    body["tools"] = [{"type": "function", "name": t.name, "description": t.description,
+                      "parameters": t.parameters} for t in tools]
+    return body
+
+
+def _bad(call, message: str) -> Exception:
+    return call.error(ResponseFormatError, f"unexpected tool-call response: {message}", status=200)
+
+
+def _nonempty(value) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _check_calls(call, output: list, completed: bool) -> None:
+    """Validate the function_call items of a terminal output list."""
+    seen = set()
+    for i, item in enumerate(output):
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            continue
+        where = f"output[{i}]"
+        if not _nonempty(item.get("call_id")):
+            raise _bad(call, f"{where} has no call_id")
+        if not _nonempty(item.get("name")):
+            raise _bad(call, f"{where} has no name")
+        if not isinstance(item.get("arguments"), str):
+            raise _bad(call, f"{where} has no argument string")
+        if item.get("id") is not None and not isinstance(item.get("id"), str):
+            raise _bad(call, f"{where} has a non-string id")
+        if completed and "status" in item and item["status"] != "completed":
+            raise _bad(call, f"completed response contains an unfinished call item ({where})")
+        if item["call_id"] in seen:
+            raise _bad(call, "duplicate call_id in one turn")
+        seen.add(item["call_id"])
+
+
+def _terminal_status(call, doc: dict) -> str:
+    _failed(call, doc, {"failed", "cancelled"})
+    status = _status(doc)
+    if not status:
+        raise _bad(call, "missing response status")
+    if status not in ("completed", "incomplete"):
+        raise _bad(call, f"non-terminal response status {doc.get('status')!r}")
+    return status
+
+
+def _replay_items(output: list) -> list:
+    return [item for item in output if isinstance(item, dict) and item.get("type") in _REPLAY_TYPES]
+
+
+def parse_tool_response(doc, call, *, kind):
+    """A non-streamed tool turn: (Result, output items or None for a diagnostic turn)."""
+    status = _terminal_status(call, doc)
+    output = doc.get("output")
+    if not isinstance(output, list):
+        raise _bad(call, "missing output list")
+    if status == "completed":
+        _check_calls(call, output, True)
+    result = make_result(TRANSPORT, text=_responses_output(doc), reasoning=_responses_reasoning(doc) or None,
+                         model=str_or_none(doc.get("model")), response_id=id_or_none(doc.get("id")),
+                         **_finish(doc), **_usage_fields(doc.get("usage")))
+    return result, (_replay_items(output) if status == "completed" else None)
+
+
+def _index(call, doc: dict) -> int:
+    index = doc.get("output_index")
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise _bad(call, f"{doc.get('type')} without a valid output_index")
+    return index
+
+
+def _track(call, streamed: dict, index: int, item_id) -> dict:
+    entry = streamed.setdefault(index, {"id": None, "added": None, "done": None, "deltas": [], "args_done": None})
+    if item_id is not None:
+        if not isinstance(item_id, str):
+            raise _bad(call, f"output item {index} has a non-string id")
+        if entry["id"] is None:
+            entry["id"] = item_id
+        elif entry["id"] != item_id:
+            raise _bad(call, f"output item {index} has conflicting ids")
+    return entry
+
+
+def _reconcile(call, streamed: dict, done_items: dict, final: dict) -> list:
+    """The canonical output list: the terminal output, checked against the streamed call items."""
+    output = final.get("output")
+    if isinstance(output, list) and output:
+        for index, entry in streamed.items():
+            item = output[index] if index < len(output) else None
+            if not isinstance(item, dict) or item.get("type") != "function_call":
+                raise _bad(call, f"streamed call item {index} is not in the terminal output")
+            if entry["id"] is not None and item.get("id") not in (None, entry["id"]):
+                raise _bad(call, f"call item {index} id differs from the stream")
+            for source in (entry["added"], entry["done"]):
+                if isinstance(source, dict):
+                    for key in ("call_id", "name"):
+                        if source.get(key) not in (None, "") and source.get(key) != item.get(key):
+                            raise _bad(call, f"call item {index} {key} differs from the stream")
+            if isinstance(entry["done"], dict) and entry["done"].get("arguments") not in (None, item.get("arguments")):
+                raise _bad(call, f"call item {index} arguments differ from the stream")
+            if entry["args_done"] is not None and entry["args_done"] != item.get("arguments"):
+                raise _bad(call, f"call item {index} arguments differ from the stream")
+            if entry["deltas"] and "".join(entry["deltas"]) != item.get("arguments"):
+                raise _bad(call, f"call item {index} arguments differ from the streamed fragments")
+        return output
+    for index, entry in streamed.items():  # no terminal output: every call item must have finished
+        if entry["done"] is None:
+            raise _bad(call, f"stream ended mid-call (output item {index})")
+    return [done_items[i] for i in sorted(done_items)]
+
+
+def parse_tool_stream(events, acc: Acc, call, *, kind):
+    """A streamed tool turn: (Result, output items or None for a diagnostic turn)."""
+    saw_event = False
+    final = final_type = None
+    raw_usage = None
+    streamed: dict[int, dict] = {}   # output_index -> function_call tracking
+    done_items: dict[int, dict] = {}  # output_index -> output_item.done item, any type
+    for doc in events:
+        if doc == "[DONE]":
+            continue
+        saw_event = True
+        etype = str(doc.get("type") or "")
+        if etype == "response.output_text.delta":
+            acc.add_text(_text_fragment(doc.get("delta")))
+        elif "reasoning" in etype.lower() and etype.lower().endswith(".delta"):
+            acc.add_reasoning(_text_fragment(doc.get("delta")))
+        if etype == "error":
+            raise call.error(BackendError, "provider reported an error mid-stream", status=200,
+                             body=json.dumps(doc))
+        if etype in ("response.output_item.added", "response.output_item.done"):
+            item = doc.get("item")
+            if not isinstance(item, dict):
+                raise _bad(call, f"{etype} without an item")
+            index = _index(call, doc)
+            if etype.endswith(".done"):
+                done_items[index] = item
+            if item.get("type") == "function_call":
+                acc.admit()
+                entry = _track(call, streamed, index, item.get("id"))
+                entry["done" if etype.endswith(".done") else "added"] = item
+        elif etype in ("response.function_call_arguments.delta", "response.function_call_arguments.done"):
+            acc.admit()
+            entry = _track(call, streamed, _index(call, doc), doc.get("item_id"))
+            if etype.endswith(".delta"):
+                if not isinstance(doc.get("delta"), str):
+                    raise _bad(call, "argument fragment is not a string")
+                entry["deltas"].append(doc["delta"])
+            else:
+                if not isinstance(doc.get("arguments"), str):
+                    raise _bad(call, "argument string is not a string")
+                entry["args_done"] = doc["arguments"]
+        nested = doc.get("response")
+        if isinstance(nested, dict):
+            if id_or_none(nested.get("id")):
+                acc.meta["response_id"] = nested["id"]
+            if str_or_none(nested.get("model")):
+                acc.meta["model"] = nested["model"]
+            if isinstance(nested.get("usage"), dict):
+                raw_usage = nested["usage"]
+            if etype in _TERMINAL:
+                final, final_type = nested, etype
+                acc.terminal()
+                break
+    if not saw_event:
+        raise call.error(BackendError, "provider returned no SSE response events")
+    if final is None:
+        raise call.error(BackendError, "stream ended before completion")
+    status = _terminal_status(call, final)
+    if _TERMINAL_STATUS.get(final_type) != status:
+        raise _bad(call, f"{final_type} carries status {final.get('status')!r}")
+    if not acc.text:
+        acc.add_text(_responses_output(final))
+    if not acc.reasoning:
+        acc.add_reasoning(_responses_reasoning(final))
+    result = acc.result(**_finish(final), **_usage_fields(raw_usage))
+    if status != "completed":
+        return result, None
+    output = _reconcile(call, streamed, done_items, final)
+    _check_calls(call, output, True)
+    return result, _replay_items(output)

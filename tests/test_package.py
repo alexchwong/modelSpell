@@ -1,4 +1,4 @@
-"""Packaging and concurrency: K1–K6 (spec §12.8; K1 updated in spec v8)."""
+"""Packaging and concurrency: K1–K6 (spec §12.8; K1 updated in spec v8 and v9)."""
 import dataclasses
 import importlib.util
 import pathlib
@@ -6,12 +6,14 @@ import re
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
 import modelspell
 
-from modelspell import (CancelHandle, Endpoint, Message, ModelInfo, Pricing, ProviderInfo, Result, Usage, complete)
+from modelspell import (CancelHandle, Endpoint, Message, ModelInfo, Pricing, ProviderInfo, Result, RetryEvent, ToolCall,
+                        ToolDefinition, ToolOutput, ToolTurn, Usage, complete)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIELDS = {
@@ -26,17 +28,27 @@ FIELDS = {
                 "pricing", "raw"],
     ProviderInfo: ["name", "slug", "context_length", "max_completion_tokens", "quantization", "pricing",
                    "supported_parameters", "raw"],
+    ToolDefinition: ["name", "description", "parameters"],
+    ToolCall: ["id", "name", "arguments_json"],
+    ToolOutput: ["call_id", "content"],
+    RetryEvent: ["attempt", "next_attempt", "delay", "status"],
 }
+TOOL_TURN_PROPERTIES = ["clean", "replay", "result", "route_identity", "tool_calls"]
 
 
 def test_k1_public_api():
     assert modelspell.__all__ == [
-        "complete", "list_models", "list_providers", "supported_settings", "check_settings",
+        "complete", "complete_with_tools", "list_models", "list_providers", "supported_settings", "check_settings",
+        "check_completion", "check_tool_request",
         "Endpoint", "Message", "Result", "Usage", "ModelInfo", "ProviderInfo", "Pricing",
+        "ToolDefinition", "ToolCall", "ToolTurn", "ToolOutput", "RetryEvent",
         "CancelHandle", "ModelSpellError", "ConfigError", "UnsupportedSetting", "UnsupportedOperation",
-        "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError", "Cancelled"]
+        "AuthError", "ConnectError", "RequestTimeout", "BackendError", "ResponseFormatError", "Cancelled",
+        "choose_provider", "ProviderSelection", "ProviderSelectionError"]
     for cls, names in FIELDS.items():
         assert [f.name for f in dataclasses.fields(cls)] == names
+    assert not dataclasses.is_dataclass(ToolTurn)
+    assert sorted(n for n, v in vars(ToolTurn).items() if isinstance(v, property)) == TOOL_TURN_PROPERTIES
 
 
 def test_k2_import_makes_no_network_calls():
@@ -72,7 +84,7 @@ def test_k3_k7_wheel_contents_and_clean_venv_install(tmp_path):
     assert "smoke ok" in smoke and str(tmp_path / "venv") in smoke
 
 
-def test_k4_concurrency(make_server):
+def test_k4_concurrency():
     import json
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -88,25 +100,52 @@ def test_k4_concurrency(make_server):
         def log_message(self, *a):
             pass
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Echo)
-    httpd.daemon_threads = True
-    threading.Thread(target=httpd.serve_forever, args=(0.02,), daemon=True).start()
+    class EchoServer(ThreadingHTTPServer):
+        # Accommodate all 16 clients even when a busy runner delays the accept loop.
+        request_queue_size = 64
+        daemon_threads = True
+
+    httpd = EchoServer(("127.0.0.1", 0), Echo)
+    server_thread = threading.Thread(target=httpd.serve_forever, args=(0.02,), daemon=True)
     endpoint = Endpoint(kind="openai_compat", base_url=f"http://127.0.0.1:{httpd.server_address[1]}/v1")
     results = {}
+    errors = {}
+    lock = threading.Lock()
 
     shared = CancelHandle()  # spec v8 §12.8: also with one shared handle that is never cancelled
 
     def worker(i):
-        results[i] = complete(endpoint, "m", f"prompt-{i}").text
-        results[100 + i] = complete(endpoint, "m", f"prompt-{i}", cancel=shared).text
+        phase = "without handle"
+        try:
+            text = complete(endpoint, "m", f"prompt-{i}", timeout=10).text
+            with lock:
+                results[i] = text
+            phase = "shared handle"
+            text = complete(endpoint, "m", f"prompt-{i}", cancel=shared, timeout=10).text
+            with lock:
+                results[100 + i] = text
+        except Exception as exc:
+            with lock:
+                errors[i] = f"{phase}: {type(exc).__name__}: {exc}"
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(30)
-    httpd.shutdown()
-    httpd.server_close()
+    threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(16)]
+    server_thread.start()
+    try:
+        deadline = time.monotonic() + 30
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(max(0, deadline - time.monotonic()))
+        alive = [i for i, t in enumerate(threads) if t.is_alive()]
+        assert not alive, f"K4 workers did not finish within 30 seconds: {alive}"
+        assert not errors, f"K4 worker failures: {errors}"
+    finally:
+        try:
+            httpd.shutdown()
+        finally:
+            httpd.server_close()
+            server_thread.join(5)
+    assert not server_thread.is_alive(), "K4 server thread did not stop"
     assert results == {**{i: f"prompt-{i}" for i in range(16)}, **{100 + i: f"prompt-{i}" for i in range(16)}}
     assert shared._watches == set() and not shared.cancelled
 
@@ -135,6 +174,8 @@ def test_k6_hashable():
         Result("t", None, Usage(1, 2, 3), None, None, False, None, None, None, "responses", ({"a": 1},), {"u": 1}),
         ModelInfo("id", None, None, None, None, None, ("off",), pricing, {"r": 1}),
         ProviderInfo("n", "s", None, None, None, pricing, ("tools",), {"r": 1}),
+        ToolDefinition("t", "d", {"type": "object", "properties": {"a": {"enum": [1, 2]}}}), ToolCall("i", "n", "{"),
+        ToolOutput("i", "x"), RetryEvent(1, 2, 1.0, 429),
     ]
     for obj in instances:
         hash(obj)
