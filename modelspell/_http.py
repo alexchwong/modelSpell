@@ -40,6 +40,7 @@ class Call:
     timeout: float
     model: str | None = None
     route: str | None = None  # "responses" | "lmstudio_native" | None
+    idle_timeout: float | None = None  # streaming: longest wait between data events (comments do not count)
 
     def redact(self, text: Any) -> str:
         text = str(text)

@@ -347,6 +347,7 @@ def check_completion(
     timeout: float = _COMPLETION_TIMEOUT,
     rate_limit_retries: int = 0,
     max_retry_wait: float = _MAX_RETRY_WAIT,
+    idle_timeout: float | None = None,
     **unknown: Any,
 ) -> None:
     """Check an ordinary completion's target, typed settings and transport options offline.
@@ -361,6 +362,8 @@ def check_completion(
                     frequency_penalty=frequency_penalty, seed=seed, stop=stop)
     _check_completion_config(endpoint, model, reasoning, settings, provider, timeout,
                              rate_limit_retries, max_retry_wait)
+    if idle_timeout is not None:
+        _check_timeout(idle_timeout)
 
 
 def complete(
@@ -388,12 +391,15 @@ def complete(
     rate_limit_retries: int = 0,
     max_retry_wait: float = _MAX_RETRY_WAIT,
     on_retry: Callable[[RetryEvent], None] | None = None,
+    idle_timeout: float | None = None,
 ) -> Result:
     settings = dict(max_tokens=max_tokens, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p,
                     repetition_penalty=repetition_penalty, presence_penalty=presence_penalty,
                     frequency_penalty=frequency_penalty, seed=seed, stop=stop)
     route, model_id, info, policy = _check_completion_config(
         endpoint, model, reasoning, settings, provider, timeout, rate_limit_retries, max_retry_wait)
+    if idle_timeout is not None:
+        _check_timeout(idle_timeout)
     if extra is not None and (not isinstance(extra, Mapping) or {"model", "stream"} & set(extra)):
         raise ConfigError("extra must be a mapping without the keys 'model' or 'stream'")
     if any(cb is not None and not callable(cb) for cb in (on_text, on_reasoning)):
@@ -426,7 +432,8 @@ def complete(
     cap = body.get("max_output_tokens")
     cap = cap if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1 else None
 
-    call = _http.Call(url=url, key=key, timeout=timeout, model=model_id, route=route.hint)
+    call = _http.Call(url=url, key=key, timeout=timeout, model=model_id, route=route.hint,
+                      idle_timeout=float(idle_timeout) if idle_timeout is not None and streaming else None)
 
     def parse(response, acc: Acc, watch: _Watch) -> Result:
         if not streaming:
