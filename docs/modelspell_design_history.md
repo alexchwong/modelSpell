@@ -262,3 +262,10 @@ paid-attempt cap before it opts in.
 - Completion, discovery and selection share a 1,000,000-second cap. It leaves room below socket
   selector and thread wait limits. Retry wait uses the same cap and permits zero. Selection
   retains its own deadline, and completion still applies its timeout separately to each attempt.
+
+## 0.4.1 — Detect SSE streams stalled on keep-alives
+
+Keep the socket timeout and its default unchanged. Add an opt-in check for streamed ordinary
+completions because keep-alive comments can keep a stalled socket open. The check runs when
+the parser receives a non-data line; it is not a deadline that interrupts a blocked read.
+See [spec v9 §9.4](modelspell_v1_spec_v9.md#94-timeout-semantics).

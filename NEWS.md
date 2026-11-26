@@ -1,5 +1,9 @@
 # NEWS
 
+## 0.4.1
+
+- `complete()` adds optional `idle_timeout` for streams stalled on keep-alives; `check_completion()` validates it offline.
+
 ## 0.4.0
 
 - Added `choose_provider()` for OpenRouter-managed routing, manual pins, and automatic Cheapest, Balanced or Fastest selection.

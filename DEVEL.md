@@ -409,20 +409,24 @@ Do not fabricate reports to represent live tests performed outside that harness.
 
 1. Work on `devel`. Finalize the intended library payload, version in
    `modelspell/_version.py`, and matching `NEWS.md` section. A new version is required only
-   for shipped-file changes after that version has already been published. Documentation,
-   tests and release workflow changes alone require neither a bump nor a NEWS entry.
+   for shipped-file changes after that version has already been published. The release check
+   counts `modelspell/`, `pyproject.toml`, `README.md` (wheel description) and `LICENSE` as
+   payload. Maintainer-only docs, tests and workflow changes require neither a bump nor a
+   NEWS entry.
 2. Complete offline and live testing as above. Record their results and any unavailable
    coverage in the PR. The release owner may confirm already-completed live tests; CI does
    not rerun paid live calls. Do not merge with a known modelSpell functionality blocker.
 3. Commit and push `devel`, then open the PR targeting `main`:
 
    ```bash
+   version=$(.venv/bin/python -c 'from modelspell import __version__; print(__version__)')
    git push origin devel
-   gh pr create --base main --head devel --title "Release modelSpell 0.4.0" --body-file /tmp/modelspell-release-pr.md
+   gh pr create --base main --head devel --title "Release modelSpell $version" \
+     --body-file /tmp/modelspell-release-pr.md
    ```
 
    Write the PR body first: include version, offline outcome, live outcome/date and any
-   skipped coverage. Use the intended version in the title for future releases.
+   skipped coverage.
 4. Wait for required offline CI and merge the PR. No draft release, manually staged wheel,
    named provider-gate JSON, or downstream retest is needed. Publication is triggered by
    the merge to `main` and waits for all four offline CI jobs.
@@ -436,9 +440,10 @@ Do not fabricate reports to represent live tests performed outside that harness.
 
 ### Recovery when a release PR already merged
 
-Fix documentation/workflow issues on `devel` and merge a follow-up PR without changing the
-library version or payload. Reuse completed live tests for that payload. The follow-up merge
-triggers publication automatically. If a manual retry is needed, select current `main`:
+Fix documentation/workflow issues on `devel` and merge a follow-up PR. If the version is already
+published, keep its payload unchanged; a payload change requires a new version. Reuse completed
+live tests for the same library payload. The follow-up merge triggers publication automatically.
+If a manual retry is needed, select current `main`:
 
 ```bash
 gh workflow run release.yml --ref main

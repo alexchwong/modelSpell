@@ -475,6 +475,7 @@ V021 = [("endpoint", "POSITIONAL_OR_KEYWORD", inspect.Parameter.empty),
 
 V040 = [("rate_limit_retries", "KEYWORD_ONLY", 0), ("max_retry_wait", "KEYWORD_ONLY", 30.0),
         ("on_retry", "KEYWORD_ONLY", None)]  # spec v9 §6.11: additive again in 0.4.0
+V041 = [("idle_timeout", "KEYWORD_ONLY", None)]  # additive: stream idle limit (stalled-upstream fix, unreleased)
 
 
 def test_c8_additive_signature():
@@ -482,7 +483,7 @@ def test_c8_additive_signature():
     assert [(p.name, p.kind.name, p.default) for p in params[:len(V021)]] == V021
     cancel = params[len(V021)]
     assert (cancel.name, cancel.kind, cancel.default) == ("cancel", inspect.Parameter.KEYWORD_ONLY, None)
-    assert [(p.name, p.kind.name, p.default) for p in params[len(V021) + 1:]] == V040
+    assert [(p.name, p.kind.name, p.default) for p in params[len(V021) + 1:]] == V040 + V041
     assert Cancelled().sent is None and Cancelled().partial is None
 
 

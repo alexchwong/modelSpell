@@ -1,6 +1,6 @@
 # modelSpell v1 — Implementation Specification (spec v9)
 
-**Status:** Implemented (package 0.4.0); release-candidate live evidence tracked in §17 and the provider refactor gate report. The live verifications (§17) and owner checks (§18.4) are recorded in `tests/fixtures/README.md`; no code depends on their outcome at runtime.
+**Status:** Implemented (package 0.4.0), with the 0.4.1 stream idle timeout addition (§9.4). The live verifications (§17) and owner checks (§18.4) are recorded in `tests/fixtures/README.md`; no code depends on their outcome at runtime.
 **Date:** 11 November 2026
 **Package:** modelSpell. Distribution (display) name `modelSpell`; import name `modelspell`. pip normalises distribution names, so `modelSpell` and `modelspell` name the same distribution. Licensed under MIT. Released only as a wheel on GitHub releases (§18); not published to PyPI.
 **Version:** spec v9, superseding `modelspell_v1_spec_v8.md` (kept in `docs/` as history). v9 is package 0.4.0. It folds in the *modelSpell 0.4.0 proposal* (version 4, 11 November 2026): client-executed function calling through `complete_with_tools()` and `check_tool_request()` (§21), and opt-in HTTP 429 recovery on both completion entry points (§6.11). Its decisions are listed in §22. This edition includes configuration refactor v4 in §6, §7.1 and §10. v8 was package 0.3.0. It folds in the *modelSpell 0.3.0 technical specification* (version 4, 2 November 2026): cancellation from another thread through a `CancelHandle` (§6.10, §8.10, §9.6; M30-1–M30-7, M30-15), usage while streaming (§17, M30-8), the owner-check battery (§18.4; M30-10, M30-16–M30-21) and the developer UI's Stop through the handle and owner-check section (§18.3, M30-11). Its decisions are listed in §20. v7 was package 0.2.1. v7 folded in the *modelSpell 0.2.1 technical specification* (version 6, 28 October 2026): `top_p` on LM Studio Responses (M21-1) by the referenced Responses documentation (M21-2); no release decision depends on model output (M21-3); refusal message guidance (M21-5); the LM Studio probe diagnostic (M21-6). Its decisions are listed in §19. v6 folded in the *modelSpell 0.2.0 technical specification* (version 3, 27 October 2026): the generation settings — eight new `complete()` arguments, the per-route support and range tables, `supported_settings()` and `check_settings()` (§3, §6.1, §6.7–§6.9, §7), their tests (§12.3, §12.8), verification V2 (§17) and the developer UI's request panel (§18.3). v5 added the naming, version file, license, release and developer-UI requirements; v4 is the original library contract. Review decisions and change maps are in `docs/modelspell_design_history.md`. That document is informative and not part of this contract.
@@ -214,6 +214,7 @@ def complete(
     rate_limit_retries: int = 0,                          # v9, §6.11
     max_retry_wait: float = 30.0,                         # v9, §6.11
     on_retry: Callable[[RetryEvent], None] | None = None, # v9, §6.11
+    idle_timeout: float | None = None,                   # 0.4.1, §9.4
 ) -> Result
 ```
 
@@ -232,6 +233,7 @@ All arguments after `input` are keyword-only; their order is not significant. **
 | `provider` | `None`, or a mapping, and only when `kind == "openrouter"` | `UnsupportedSetting` on other kinds |
 | `extra` | `None` or a mapping; must not contain the keys `model` or `stream` | `ConfigError` |
 | `timeout` | non-boolean integer or finite float in (0, 1,000,000] seconds | `ConfigError` |
+| `idle_timeout` (0.4.1) | `None` or a non-boolean integer or finite float in (0, 1,000,000] seconds | `ConfigError` |
 | `on_text`, `on_reasoning` | `None` or callable | `ConfigError` |
 | `cancel` (v8) | `None` or a `CancelHandle` (§6.10) | `ConfigError`: `cancel must be None or a CancelHandle` |
 | `rate_limit_retries` (v9) | `int` from 0 to 3, not `bool` | `ConfigError` |
@@ -247,7 +249,7 @@ The order in which these checks run is fixed in §6.8.4.
 
 The request is streamed if and only if `on_text` or `on_reasoning` is not `None`. In both modes `complete()` returns the same complete `Result`.
 
-Streaming is the recommended mode for long generations, because it makes `timeout` an idle timeout rather than a limit on total generation time (§9.4). A no-op callback (`on_text=lambda s: None`) is enough to enable it.
+Streaming is the recommended mode for long generations, because `timeout` limits each socket read rather than effectively bounding the whole generation (§9.4). A no-op callback (`on_text=lambda s: None`) is enough to enable streaming.
 
 ### 6.3 Route selection
 
@@ -409,7 +411,7 @@ Every numeric setting must be finite: `temperature` and the new numeric argument
 
 So for each argument the value check comes before support: a malformed value is reported as malformed even on a route that would refuse the argument anyway, which keeps the error stable when the caller changes route.
 
-**Ordinary completion validation.** `check_completion()` and `complete()` check the endpoint type and model ID, run the route and generation checks above, prepare the typed provider policy (§7.1), and validate timeout, retry count and retry wait, in that order. `complete()` then checks `extra`, callbacks, `cancel`, `on_retry` and messages, and resolves the key (§4.2). An already-cancelled handle raises `Cancelled(sent=False)` after pre-send validation and before socket creation (M30-7).
+**Ordinary completion validation.** `check_completion()` and `complete()` check the endpoint type and model ID, run the route and generation checks above, prepare the typed provider policy (§7.1), and validate `timeout`, retry count, retry wait and `idle_timeout`, in that order. `complete()` then checks `extra`, callbacks, `cancel`, `on_retry` and messages, and resolves the key (§4.2). An already-cancelled handle raises `Cancelled(sent=False)` after pre-send validation and before socket creation (M30-7).
 
 ### 6.9 Offline preflights and `supported_settings()`
 
@@ -431,7 +433,8 @@ def check_completion(
     endpoint: Endpoint, model: str | ModelInfo, *,
     reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None,
     repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None,
-    provider=None, timeout=900.0, rate_limit_retries=0, max_retry_wait=30.0, **unknown,
+    provider=None, timeout=900.0, rate_limit_retries=0, max_retry_wait=30.0, idle_timeout=None,
+    **unknown,
 ) -> None   # parameter types as in complete()
 ```
 
@@ -895,10 +898,10 @@ After the stream:
 
 ### 8.9 SSE line handling (shared)
 
-This ports NEL's line loop, with one deviation (#16). Iterate the HTTP response line by line (`for raw_line in response`). Then:
+This ports NEL's line loop, with deviations #16 and #19. Iterate the HTTP response line by line (`for raw_line in response`). Then:
 
 1. Decode with `raw_line.decode("utf-8", errors="replace").strip()`. Line-wise decoding is safe because a multi-byte UTF-8 sequence never contains the byte `\n`.
-2. Skip the line if it is empty or starts with `:` (comment or keep-alive, e.g. `: OPENROUTER PROCESSING`). Skip lines that do not start with `data:`, such as `event:`, `id:` and `retry:`.
+2. Skip the line if it is empty or starts with `:` (comment or keep-alive, e.g. `: OPENROUTER PROCESSING`). Skip lines that do not start with `data:`, such as `event:`, `id:` and `retry:`. Before skipping these lines, apply the optional idle timeout check (§9.4).
 3. `data = line[5:].strip()`. Skip it if it is empty.
 4. `"[DONE]"` is passed through to the route handler.
 5. Otherwise `json.loads(data)`. **Deviation #16:** if decoding fails, or the result is not a dict, raise `ResponseFormatError(status=200)`. Its message is `"malformed SSE data event"`, and its `body` is the data, redacted and then truncated to 600 characters (§9.3). The caller's `try/finally` closes the connection (§8.10). NEL skipped such lines, which can return success with text missing.
@@ -934,7 +937,7 @@ class UnsupportedOperation(ModelSpellError): ...   # e.g. list_providers on lmst
 class AuthError(ModelSpellError):                  # missing key, HTTP 401/403
     status: int | None
 class ConnectError(ModelSpellError): ...           # endpoint unreachable
-class RequestTimeout(ModelSpellError): ...         # socket timeout (connect or read)
+class RequestTimeout(ModelSpellError): ...         # socket timeout or SSE idle timeout
 class BackendError(ModelSpellError):               # server-reported failure, including redirects
     status: int | None                             # HTTP status; 200 for in-stream errors; None if n/a
     body: str                                      # redacted, then truncated to ≤ 1000 chars
@@ -975,7 +978,9 @@ class Cancelled(ModelSpellError):
 
 ### 9.4 Timeout semantics
 
-`timeout` is passed to `opener.open(request, timeout=timeout)`, unchanged on every attempt of an opted-in retry (v9, §6.11). It applies to the connection attempt and to each individual socket read, so during streaming it acts as an idle timeout. The NEL default of 900 s is kept, because local models can spend minutes on prefill before the first token. There is no total-duration cap.
+`timeout` is passed to `opener.open(request, timeout=timeout)`, unchanged on every attempt of an opted-in retry (v9, §6.11). It applies to the connection attempt and to each individual socket read, even when the bytes received contain only keep-alives. The NEL default of 900 s is kept, because local models can spend minutes on prefill before the first token. There is no total-duration cap.
+
+**Optional SSE idle timeout (0.4.1, deviation #19).** `complete()` and `check_completion()` accept `idle_timeout=None` (disabled) or the same numeric types and bounds as `timeout`. Non-streamed completions validate it but do not use it. It is not a tool-call option. When enabled for streaming, the parser starts a monotonic timer as it begins reading the SSE body. Each non-empty `data:` line resets the timer, regardless of whether it yields text. A blank line, comment or other non-`data:` line received after more than `idle_timeout` seconds raises `RequestTimeout`. An empty `data:` line neither resets nor checks the timer. This does not interrupt a pending read: a late non-empty `data:` line resets the timer without an idle-timeout error, and the socket read timeout still applies independently. See §12.5 S15.
 
 **Consequence for non-streamed calls.** A non-streamed request receives no bytes until generation has finished. So `timeout` is effectively a limit on prefill plus the whole generation. For example, a 16,384-token generation at about 20 tokens/s takes about 800 s before prefill. Long local generations should be streamed (§6.2). The README MUST state this.
 
@@ -1275,6 +1280,7 @@ Minimum fixture set per route:
 | S12 | A callback raising `ValueError` → the same `ValueError` object propagates unwrapped, and the connection is closed. |
 | S13 | **Terminal events end the read.** This test does not measure elapsed time. Serve each stream below with the §12.1 hold-open mode, so the body stays open until teardown sets the release event. The streams are: Responses ending in `response.completed`; Responses ending in `response.incomplete`; native ending in `chat.end`; native with an `error` event before `chat.end`; and chat ending in `[DONE]`. Call `complete()` with `timeout=2` in a worker thread, joined with a 30 s watchdog; a watchdog expiry fails the test as a hang. Assert two things. First, each call returns its normal `Result`, or for the native `error` case raises the §8.8 `BackendError`, and never raises `RequestTimeout`. Second, the server's `client_closed` event is set (wait on it, bounded by the watchdog). A correct implementation never reads after the terminal event, so its outcome does not depend on scheduling. `timeout=2` only bounds how long a broken implementation takes to fail with `RequestTimeout`. **Negative case:** a terminal event without its dict payload (`response` or `result`) does not end the read, so that call raises `RequestTimeout`. |
 | S14 | (v8) **Usage while streaming.** No streamed request body on any route carries `stream_options` (every streamed golden, and one streamed call per kind). OpenRouter's final usage chunk is parsed into `Result.usage`; the `openai_compat` fixture without usage gives `usage is None`. A chat stream cancelled through a handle after its usage chunk but before `[DONE]` gives `partial.usage is None` (MS-8). |
+| S15 | (0.4.1) **SSE idle timeout.** A simulated OpenRouter stream sending only keep-alive comments raises `RequestTimeout` with `idle_timeout` set below the socket timeout. A paced stream with data completes normally. The offline preflight accepts a valid interval and rejects zero, negative, boolean and string values. See [`tests/test_stream.py`](../tests/test_stream.py). |
 
 ### 12.6 Errors, transport and secrets
 
@@ -1450,13 +1456,14 @@ NEL's `SECRETS` store, and its injection of keys into child processes, stay in `
 | 16 | Malformed SSE `data:` events raise `ResponseFormatError` | NEL skipped them, which can return success with text missing | S4 |
 | 17 | `ProviderInfo.slug` comes only from `tag`; there is no name-derived fallback | A display name is not a routing identifier | D2 |
 | 18 | Responses and native streams stop reading at their terminal event (`response.completed` / `response.incomplete` / `response.failed` with a dict `response`; `chat.end` with a dict `result`), not at the end of the HTTP body | NEL read until the server closed the body. A slow close by the server or a proxy could delay a finished generation or turn it into a timeout. | S13 |
+| 19 | Ordinary streamed completions can opt into an SSE idle timeout | Keep-alive comments can prevent the socket timeout from firing when a stream stops delivering data. | S15 |
 
 Unchanged from NEL, on purpose:
 
 - multi-turn flattening on the native route;
 - the reasoning-alias selection rule;
 - the Responses reasoning-delta matching rule;
-- a single per-read timeout with a 900 s default;
+- a per-read socket timeout with a 900 s default;
 - ModelSpell never adds `previous_response_id`, and sends no `store` field on the Responses route;
 - the Chat Completions stream reads until `[DONE]` or the end of the body;
 - cost taken from `usage.cost` with no request flag.
@@ -1558,7 +1565,7 @@ No code depends on the outcome. `slug` stays `tag`, passed verbatim, and `None` 
 ### Definition of done
 
 - All tests in §12.3–§12.8 pass.
-- (v9) T1–T11 and L1–L13 pass, the installed wheel passes the tool smoke, and VT has been run or recorded as blocked per configuration. Publication additionally requires the [named OpenRouter gate and AgentWiz retest](model_provider_refactor_v6.md#7-release-acceptance) on the same candidate wheel.
+- (v9) T1–T11 and L1–L13 pass, the installed wheel passes the tool smoke, and VT has been run or recorded as blocked per configuration. For publication, follow [DEVEL.md](../DEVEL.md#branches-and-releases). The [named OpenRouter gate and AgentWiz retest](model_provider_refactor_v6.md#7-release-acceptance) are historical, not release requirements.
 - A captured success-path fixture exists for each route and discovery URL where a server was available. Every synthetic fixture is labelled in the coverage table, with a reason for synthetic success-path fixtures.
 - The wheel installs into a clean venv and imports with no other packages present.
 - V1 has been run, or is reported as skipped with the reason.
@@ -1596,12 +1603,12 @@ This section governs repository tooling around the package. None of it changes l
 
 ### 18.2 Release artifact and workflow
 
-- **The install artifact is the wheel** `modelspell-X.Y.Z-py3-none-any.whl`, attached to GitHub release `vX.Y.Z` alongside its sanitized `provider-gate.json` verification report. GitHub supplies automatic source archives. The wheel is the supported install channel.
+- **The install artifact is the wheel** `modelspell-X.Y.Z-py3-none-any.whl`, attached to GitHub release `vX.Y.Z` with its SHA-256 in the release notes. GitHub supplies automatic source archives. The wheel is the supported install channel.
 - **Wheel contents** are fixed by `packages = ["modelspell"]`: exactly `modelspell/**`, `METADATA`, `WHEEL`, `RECORD` and `licenses/LICENSE` (K7). The sdist target is restricted to `modelspell/`, `pyproject.toml`, `README.md` and `LICENSE`, so tests, the UI, scripts and docs never ship in either form.
 - **`scripts/build_release.py`** builds from `git archive` of `HEAD` or the source specified by `--commit` (uncommitted edits are excluded and reported), requires a `## X.Y.Z` heading in `NEWS.md`, verifies the wheel's contents and metadata exactly, and with `--smoke` installs the wheel into a fresh venv and runs `scripts/smoke_installed.py` (K3). It prints the wheel path and sha256. `--changed-since TAG` exits 1 when any shipped file (`modelspell/`, `pyproject.toml`, `README.md`, `LICENSE`) changed since `TAG`.
 - **Branches:** development on `devel`; `main` receives merges from `devel`.
 - **`.github/workflows/tests.yml`** runs the offline suite and wheel smoke on pushes to `devel` and `main`, on pull requests, and when called by the release workflow. The matrix covers Python 3.10 and 3.13 on Linux and macOS.
-- **`.github/workflows/release.yml`** runs on pushes to `main` and on manual dispatch on `main`. After the test matrix passes, it checks out the tested commit and verifies the draft release's gate report, wheel SHA-256, and source payload against that commit. It publishes the exact verified wheel and gate report, with NEWS-derived notes and a pinned install line. The workflow checks that `main` still points to the tested commit before publishing and verifies the published wheel's digest. For an already published version, `build_release.py --changed-since vX.Y.Z` requires a version bump if shipped files changed. See the [release checklist](../DEVEL.md#openrouter-verification-and-release-checklist).
+- **`.github/workflows/release.yml`** runs on pushes to `main` and on manual dispatch on `main`. After the test matrix passes, it builds, verifies and smoke-tests the wheel from the tested commit. It checks that `main` still points to that commit, publishes the verified wheel with NEWS-derived notes and a hash-pinned install line, and checks the published wheel's digest. For an already published version, `build_release.py --changed-since vX.Y.Z` requires a version bump if shipped files changed. See the [release checklist](../DEVEL.md#pr-based-release).
 
 ### 18.3 Developer test UI
 

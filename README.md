@@ -8,11 +8,7 @@ modelSpell is a **controlled adaptation** of the completion client in [NEL](http
 
 ## Install
 
-Install from a [GitHub release](https://github.com/alexchwong/modelSpell/releases). Each release attaches one wheel and gives its sha256 in the notes. In a downstream `pyproject.toml` or requirements file, pin it by URL and hash:
-
-```
-modelSpell @ https://github.com/alexchwong/modelSpell/releases/download/v0.4.0/modelspell-0.4.0-py3-none-any.whl#sha256=<sha256 from the release notes>
-```
+Install from a [GitHub release](https://github.com/alexchwong/modelSpell/releases). Choose the version you want and copy the exact URL-and-SHA-256-pinned requirement from its **Install** notes into your downstream `pyproject.toml` or requirements file. Each release attaches one wheel.
 
 The wheel contains only the library; it has no dependencies and needs no build step. Releases are the supported install channel; installing from an arbitrary commit is unsupported. `modelspell.__version__` reports the installed version. Licensed under MIT (`LICENSE`).
 
@@ -33,8 +29,8 @@ from modelspell import (
 ```
 
 - `Endpoint(kind, base_url=None, api_key=None, api_key_env=None, headers=None)` — `kind` is `"lmstudio"`, `"openrouter"` or `"openai_compat"`. `base_url` is the OpenAI-compatible root **including `/v1`** (defaults: `http://localhost:1234/v1`, `https://openrouter.ai/api/v1`; required for `openai_compat`). OpenRouter's `api_key_env` defaults to `OPENROUTER_API_KEY`.
-- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None, rate_limit_retries=0, max_retry_wait=30.0, on_retry=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. Generation settings and `provider` set to `None` are omitted. Supported zero values are sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
-- `check_completion(endpoint, model, *, <generation settings>, provider=None, timeout=900.0, rate_limit_retries=0, max_retry_wait=30.0) -> None` — offline preflight for ordinary completions.
+- `complete(endpoint, model: str | ModelInfo, input, *, reasoning=None, max_tokens=None, temperature=None, top_p=None, top_k=None, min_p=None, repetition_penalty=None, presence_penalty=None, frequency_penalty=None, seed=None, stop=None, provider=None, extra=None, timeout=900.0, on_text=None, on_reasoning=None, cancel=None, rate_limit_retries=0, max_retry_wait=30.0, on_retry=None, idle_timeout=None) -> Result` — `input` is a string or a list of `Message` / `{"role", "content"}` dicts. Generation settings and `provider` set to `None` are omitted. Supported zero values are sent. Passing either callback streams the response; the returned `Result` is the same either way. The sampling arguments are described under [Generation settings](#generation-settings).
+- `check_completion(endpoint, model, *, <generation settings>, provider=None, timeout=900.0, rate_limit_retries=0, max_retry_wait=30.0, idle_timeout=None) -> None` — offline preflight for ordinary completions.
 - `complete_with_tools(endpoint, model, input, *, tools, ...) -> ToolTurn` and `check_tool_request(kind, *, tools, ...) -> None` — client-executed function calling; see [Tool calling](#tool-calling).
 - `choose_provider(endpoint, model, ...)` — resolve an OpenRouter routing policy and return its selection evidence. See [OpenRouter provider selection](#openrouter-provider-selection).
 - `rate_limit_retries`, `max_retry_wait`, `on_retry` — opt-in recovery from HTTP 429 on both completion functions; see [HTTP 429 recovery](#http-429-recovery).
@@ -203,7 +199,7 @@ These are two separate model turns. Inspect `follow_up` for text, more calls or 
 | LM Studio | `/v1/responses`, `store: false`, full output items replayed in order (opaque reasoning fields included) | `reasoning="off"` (the native route) is refused for tool turns. Ordinary text requests keep their old body. |
 | llama-server (`openai_compat`) | Chat Completions | Depends on the server build, model and a tool-capable chat template. Reasoning is kept in `result` but not sent back. |
 
-**Verification.** Synthetic fixtures cover the request and response formats, completed-turn rules and replay. Live verification applies to the backend, model and policy exercised in a passing tool round trip (VT). See the [live evidence record](tests/fixtures/README.md#tool-round-trips-vt-spec-v9-17--040) and the gate report attached to the 0.4.0 release. Discovery hints such as `ModelInfo.supports_tools` are advisory.
+**Verification.** Synthetic fixtures cover the request and response formats, completed-turn rules and replay. Live verification applies to the backend, model and policy exercised in a passing tool round trip (VT). See the [live evidence record](tests/fixtures/README.md#tool-round-trips-vt-spec-v9-17--040). Discovery hints such as `ModelInfo.supports_tools` are advisory.
 
 ## HTTP 429 recovery
 
@@ -228,7 +224,9 @@ These are two separate model turns. Inspect `follow_up` for text, more calls or 
 
 **Native-route truncation is a heuristic.** That API reports no stop reason, so `finish_reason` is always `None` there, and `truncated` is `output_tokens >= cap`, where the cap is `max_output_tokens` from the final request body (after `extra`). False positive: a response that ends naturally at exactly the cap reports `truncated=True`. False negative: if the backend reports no usage, `truncated` is `False` even when output was cut.
 
-**Timeouts.** Completion, discovery and selection accept non-boolean integers or finite floats in `0 < timeout <= 1_000_000` seconds. `max_retry_wait` uses the same types and upper bound and accepts zero. An explicit `None` for a timeout or retry option raises `ConfigError`. Completion `timeout` (default 900 s) applies to the connection and to each socket read. Streaming makes it an *idle* timeout. A non-streamed request receives nothing until generation finishes, so `timeout` then bounds prefill plus the whole generation (16k tokens at ~20 tok/s ≈ 800 s). **Stream long local generations** — a no-op callback (`on_text=lambda s: None`) is enough.
+**Socket timeout.** Completion, discovery and selection accept non-boolean integers or finite floats in `0 < timeout <= 1_000_000` seconds. `max_retry_wait` uses the same types and upper bound and accepts zero. An explicit `None` for `timeout`, `rate_limit_retries` or `max_retry_wait` raises `ConfigError`. Completion `timeout` (default 900 s) applies to the connection and to each socket read, not to the whole call. A non-streamed request receives nothing until generation finishes, so `timeout` then bounds prefill plus the whole generation (16k tokens at ~20 tok/s ≈ 800 s). **Stream long local generations** — a no-op callback (`on_text=lambda s: None`) is enough.
+
+**Stream idle timeout (0.4.1).** Pass `idle_timeout` to `complete()` to catch streams that keep the socket alive without delivering SSE data. The timer starts when SSE parsing begins and resets on each non-empty `data:` line. If a comment, blank line or other non-`data:` line arrives after the interval, `complete()` raises `RequestTimeout`. This is not a hard deadline: it cannot interrupt a blocked read, and a late non-empty `data:` line resets the timer. `None` (the default) disables the check; other values follow the same type and range rules as `timeout`. `check_completion()` validates it offline. Non-streamed completions validate it but do not use it, and tool calls do not accept it.
 
 **Redirects are not followed.** urllib's default handler would forward `Authorization` to the redirect target and turn POST into GET. A 3xx raises `BackendError` naming the target; set `base_url` to the final URL (e.g. `https://` if an `http://` URL redirects). Proxies (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`) are honoured.
 
@@ -381,8 +379,9 @@ result = complete(endpoint, model, "Say hello.", provider=selection.policy, **ge
 | 16 | Malformed SSE `data:` events raise `ResponseFormatError` |
 | 17 | `ProviderInfo.slug` comes only from `tag` |
 | 18 | Responses and native streams stop reading at their terminal event |
+| 19 | Ordinary streamed completions can opt into a separate SSE idle timeout |
 
-Unchanged on purpose: native multi-turn flattening; the reasoning-alias selection rule; the Responses reasoning-delta matching rule; one per-read timeout defaulting to 900 s; no `previous_response_id` and no `store` on the Responses route; the Chat Completions stream reads to `[DONE]`/EOF; cost from `usage.cost` with no request flag.
+Unchanged on purpose: native multi-turn flattening; the reasoning-alias selection rule; the Responses reasoning-delta matching rule; a per-read socket timeout defaulting to 900 s; no `previous_response_id` and no `store` on the Responses route; the Chat Completions stream reads to `[DONE]`/EOF; cost from `usage.cost` with no request flag.
 
 ## Fixtures
 

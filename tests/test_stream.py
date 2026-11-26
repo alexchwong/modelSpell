@@ -260,3 +260,32 @@ def test_s14c_cancelled_after_usage_chunk_reports_no_usage(server):
     exc = out["exc"]
     assert exc.partial.usage is None and exc.partial.raw_usage is None and exc.partial.cost is None  # MS-8
     assert exc.partial.text == "Héllo 🌍z"
+
+
+def test_idle_timeout_ends_a_stream_kept_open_by_comments_only(make_server):
+    """A stalled upstream behind OpenRouter: the server sends only `:` keep-alive comments, each of which restarts the
+    socket read timeout. idle_timeout counts from the last data event, so the call ends promptly."""
+    server = make_server()
+    keepalives = [b": OPENROUTER PROCESSING\n\n"] * 20
+    server.reply(Reply(body=keepalives, headers={"Content-Type": "text/event-stream"}, chunk_delay=0.1))
+    with pytest.raises(RequestTimeout, match="stream idle"):
+        complete(ep(server, "openrouter"), "m", "x", on_text=lambda t: None, timeout=30, idle_timeout=0.5)
+
+
+@pytest.mark.parametrize("route,stem", [("chat", "or_reasoning_synthetic")])
+def test_idle_timeout_leaves_a_paced_stream_alone(make_server, route, stem):
+    server = make_server()
+    raw = fx(f"{route}/{stem}.sse")
+    server.reply(sse_reply(f"{route}/{stem}.sse", [b": OPENROUTER PROCESSING\n\n"] + events(raw), chunk_delay=0.05))
+    out = complete(ep(server, kind_of(route, stem)), "m", "x", on_text=lambda t: None, on_reasoning=lambda t: None,
+                   idle_timeout=5)
+    assert out.text or out.reasoning
+
+
+def test_idle_timeout_is_validated():
+    from modelspell import ConfigError, Endpoint, check_completion
+    endpoint = Endpoint(kind="openrouter", base_url="https://openrouter.ai/api/v1", api_key="k")
+    check_completion(endpoint, "m", idle_timeout=60)
+    for bad in (0, -1, True, "60"):
+        with pytest.raises(ConfigError):
+            check_completion(endpoint, "m", idle_timeout=bad)

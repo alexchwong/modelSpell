@@ -1,7 +1,7 @@
 # Model provider refactor v6
 
 **Target release** — modelSpell 0.4.0  
-**Status** — Revised specification for implementation  
+**Status** — Historical provider refactor specification. Publication follows [DEVEL.md](../DEVEL.md#branches-and-releases).\
 **Scope** — OpenRouter provider selection, tool routing, and one-command verification
 
 ## 1. Release and routing choices
@@ -151,6 +151,8 @@ Test that a later VT pass leaves an earlier rejection pending, that an upstream 
 Fix `Call.key` independently within 0.4.0 with `field(repr=False)`. Add a synthetic-key regression check and retain the existing redaction coverage. Rotate the exposed key before owner live verification. The fix covers the identified repr exposure.
 
 ## 7. Release acceptance
+
+This section records the original proposal. The named gate, gate reports and downstream retest are not publication requirements.
 
 1. Run the one-command verification, pass the offline suite and installed-wheel smoke, and resolve confirmed modelSpell defects. Update the spec, README, DEVEL.md, release notes and live evidence. Update the DEVEL.md release checklist to explain the named live gate, exit codes, wheel smoke, and downstream retest. List blocked and failed cases with diagnoses. A blocked live case outside the named case can yield exit code 2 and leaves publication eligibility to the named gate and the other publication checks.
 2. **Named release case — modelSpell VT on an automatically selected configuration using Balanced and ZDR.** On the final candidate, use the rotated owner credential. Require a successful Automatic Balanced selection with p50 throughput strictly above 50 tokens/s, `zdr: true`, and a successful streamed and non-streamed modelSpell VT on the resulting pin. Resolve every response-format incident from the named case through recorded triage before clearing the gate. If the default run is pending because no eligible route exists or no model completed VT, support optional release-case model and price-cap overrides in the same script, for example `--release-model`, `--release-max-input-price`, and `--release-max-output-price`. Validate price overrides as finite nonnegative caps in USD per million input or output tokens, using the same units as the defaults. Keep the fixed request charge cap at zero and preserve the request and token budgets. Record every override and the effective configuration. The default remains key-only. A lower Balanced floor is useful for diagnosis. Using a lower floor as release evidence requires an explicit change to this acceptance case.
