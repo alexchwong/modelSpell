@@ -2,7 +2,7 @@
 
 ## 0.4.1
 
-- `complete()` adds optional `idle_timeout` to raise `RequestTimeout` when a stalled stream keeps sending only keep-alive comments.
+- `complete()` adds optional `idle_timeout` for streams stalled on keep-alives; `check_completion()` validates it offline.
 
 ## 0.4.0
 
